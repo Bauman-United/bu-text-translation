@@ -32,16 +32,18 @@ active_translations = {}
 class VKTranslationMonitor:
     """Monitor VK translation for new comments"""
     
-    def __init__(self, translation_url: str, channel_id: str, app: Application):
+    def __init__(self, translation_url: str, channel_id: str, app: Application, user_id: int):
         self.translation_url = translation_url
         self.channel_id = channel_id
         self.app = app
+        self.user_id = user_id  # User ID for direct messages
         self.seen_comments: Set[int] = set()
         self.is_active = True
         self.owner_id = None
         self.video_id = None
         self.vk_session = None
         self.vk_api = None
+        self.current_score = (0, 0)  # (our_score, opponent_score)
         
         self._parse_url()
         self._initialize_vk()
@@ -61,6 +63,7 @@ class VKTranslationMonitor:
     def _initialize_vk(self):
         """Initialize VK API session"""
         if VK_ACCESS_TOKEN:
+            print(VK_ACCESS_TOKEN)
             self.vk_session = vk_api.VkApi(token=VK_ACCESS_TOKEN)
             self.vk_api = self.vk_session.get_api()
         else:
@@ -88,7 +91,7 @@ class VKTranslationMonitor:
                 # Live translation ended
                 logger.info("Translation has ended")
                 self.is_active = False
-                await self.send_message("🔴 Translation has ended. Monitoring stopped.")
+                await self.send_system_message("🔴 Translation has ended. Monitoring stopped.")
                 return False
             
             # Get comments
@@ -118,7 +121,7 @@ class VKTranslationMonitor:
         except vk_api.exceptions.ApiError as e:
             logger.error(f"VK API error: {e}")
             if e.code == 15:  # Access denied
-                await self.send_message("❌ Access denied to video. Please check VK access token permissions.")
+                await self.send_system_message("❌ Access denied to video. Please check VK access token permissions.")
                 self.is_active = False
                 return False
             return True
@@ -126,41 +129,109 @@ class VKTranslationMonitor:
             logger.error(f"Error checking comments: {e}")
             return True
     
+    def parse_score_comment(self, text: str) -> tuple:
+        """Parse score comment and return (our_score, opponent_score, surname)"""
+        # Pattern: digits-digits (optional surname)
+        # Examples: "1-0", "0-1", "1-0 богомолов", "2-1 писарев"
+        score_pattern = r'^(\d+)-(\d+)(?:\s+(\w+))?$'
+        match = re.match(score_pattern, text.strip())
+        if match:
+            our_score = int(match.group(1))
+            opponent_score = int(match.group(2))
+            surname = match.group(3) if match.group(3) else ""
+            return (our_score, opponent_score, surname)
+        return None
+    
+    def is_score_comment(self, text: str) -> bool:
+        """Check if comment contains score information in format: {number}-{number} {surname}"""
+        return self.parse_score_comment(text) is not None
+    
     async def send_comment_to_channel(self, comment: dict):
-        """Send a comment to the Telegram channel"""
+        """Send a comment to the Telegram channel only if it contains score information"""
         try:
             # Get user information
             user_id = comment.get('from_id')
             text = comment.get('text', '')
             date = datetime.fromtimestamp(comment.get('date', 0))
             
-            # Try to get user name
-            user_name = f"User {user_id}"
-            try:
-                if user_id > 0:
-                    user_info = self.vk_api.users.get(user_ids=user_id)
-                    if user_info:
-                        user_name = f"{user_info[0].get('first_name', '')} {user_info[0].get('last_name', '')}".strip()
+            # Check if comment contains score information
+            if not self.is_score_comment(text):
+                logger.debug(f"Skipping comment (not a score): {text}")
+                return
+            
+            # Parse the score
+            score_data = self.parse_score_comment(text)
+            if not score_data:
+                return
+            
+            our_score, opponent_score, surname = score_data
+            previous_our_score, previous_opponent_score = self.current_score
+            
+            # Check if our team scored (first number increased)
+            if our_score > previous_our_score:
+                message = f"⚽ Забиваем! Счет: {our_score}-{opponent_score}"
+                video_path = None
+                
+                if surname:
+                    # Check surname in lowercase
+                    surname_lower = surname.lower()
+                    # Capitalize first letter of surname for display
+                    surname_capitalized = surname.capitalize()
+                    message = f"⚽ Забиваем! Гол забил {surname_capitalized}. Счет: {our_score}-{opponent_score}"
+                    
+                    # Determine which video to attach based on surname
+                    if surname_lower in ["богомолов", "багич"]:
+                        video_path = "celebrations/богомолов.mp4"
+                    elif surname_lower == "заночуев":
+                        video_path = "celebrations/заночуев.mp4"
+                    elif surname_lower in ["панфер", "панфёр", "панферов", "панфёров"]:
+                        video_path = "celebrations/панферов.mp4"
+                    elif surname_lower in ["писарь", "писарев"]:
+                        video_path = "celebrations/писарев.mp4"
+                    elif surname_lower in ["шева", "шевченко"]:
+                        video_path = "celebrations/шевченко.mp4"
+                    else:
+                        video_path = "celebrations/другие.mp4"
+                
+                # Send message with or without video
+                if video_path:
+                    try:
+                        await self.app.bot.send_video(
+                            chat_id=self.channel_id,
+                            video=open(video_path, 'rb'),
+                            caption=message,
+                            parse_mode='HTML'
+                        )
+                    except FileNotFoundError:
+                        # Fallback to text message if video not found
+                        await self.app.bot.send_message(
+                            chat_id=self.channel_id,
+                            text=message,
+                            parse_mode='HTML'
+                        )
                 else:
-                    group_info = self.vk_api.groups.getById(group_id=abs(user_id))
-                    if group_info:
-                        user_name = group_info[0].get('name', user_name)
-            except Exception as e:
-                logger.warning(f"Could not fetch user info: {e}")
+                    await self.app.bot.send_message(
+                        chat_id=self.channel_id,
+                        text=message,
+                        parse_mode='HTML'
+                    )
+            # Check if opponent scored (second number increased)
+            elif opponent_score > previous_opponent_score:
+                message = f"Пропускаем. Счет: {our_score}-{opponent_score}"
+                await self.app.bot.send_message(
+                    chat_id=self.channel_id,
+                    text=message,
+                    parse_mode='HTML'
+                )
+            else:
+                # Score didn't change, skip this comment
+                logger.debug(f"Score didn't change: {text}")
+                return
             
-            # Format message
-            message = (
-                f"💬 <b>New Comment</b>\n\n"
-                f"👤 <b>{user_name}</b>\n"
-                f"🕐 {date.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"{text}"
-            )
+            # Update current score
+            self.current_score = (our_score, opponent_score)
             
-            await self.app.bot.send_message(
-                chat_id=self.channel_id,
-                text=message,
-                parse_mode='HTML'
-            )
+            logger.info(f"Posted score update: {message}")
             
         except Exception as e:
             logger.error(f"Error sending comment to channel: {e}")
@@ -176,13 +247,24 @@ class VKTranslationMonitor:
         except Exception as e:
             logger.error(f"Error sending message: {e}")
     
+    async def send_system_message(self, text: str):
+        """Send a system message directly to the user"""
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.user_id,
+                text=text,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Error sending system message: {e}")
+    
     async def start_monitoring(self):
         """Start monitoring the translation"""
         logger.info(f"Starting monitoring for {self.translation_url}")
-        await self.send_message(
+        await self.send_system_message(
             f"✅ Started monitoring VK translation\n"
             f"🔗 {self.translation_url}\n"
-            f"⏱ Checking every 60 seconds"
+            f"⏱ Checking every 30 seconds"
         )
         
         # Initial check to populate seen_comments
@@ -206,10 +288,10 @@ class VKTranslationMonitor:
                 is_active = await self.check_comments()
                 if not is_active:
                     break
-                await asyncio.sleep(60)  # Check every 60 seconds
+                await asyncio.sleep(30)  # Check every 30 seconds
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
-                await asyncio.sleep(60)
+                await asyncio.sleep(30)
         
         # Cleanup
         if self.translation_url in active_translations:
@@ -249,7 +331,7 @@ async def monitor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Create monitor
-        monitor = VKTranslationMonitor(translation_url, TELEGRAM_CHANNEL_ID, context.application)
+        monitor = VKTranslationMonitor(translation_url, TELEGRAM_CHANNEL_ID, context.application, update.effective_user.id)
         active_translations[translation_url] = monitor
         
         await update.message.reply_text("✅ Starting to monitor the translation...")
