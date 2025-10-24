@@ -1,15 +1,30 @@
 # VK Translation Monitor Bot
 
-A Telegram bot that monitors VK (VKontakte) video translations (live streams) and automatically sends new comments to a specified Telegram channel. The bot checks for new comments every minute and stops monitoring when the translation ends.
+A sophisticated Telegram bot that monitors VK (VKontakte) live streams and automatically detects and forwards sports score updates to a Telegram channel. The bot features intelligent score detection, celebration videos, and automatic stream discovery.
 
 ## Features
 
-- 📹 Monitor VK video translations (live streams) for new comments
-- 💬 Automatically forward new comments to a Telegram channel
-- ⏱️ Checks for new comments every 60 seconds
-- 🛑 Automatically stops monitoring when the translation ends
-- 👥 Shows comment author name and timestamp
-- 📊 Support for multiple simultaneous translations
+### 🎯 Core Functionality
+- 📹 Monitor VK live streams for sports score comments
+- ⚽ Intelligent score detection and parsing (format: "1-0", "2-1 богомолов")
+- 🎉 Automatic celebration videos based on player surnames
+- 📊 Support for multiple simultaneous stream monitoring
+- 🔄 Real-time monitoring with 30-second intervals
+
+### 🤖 Advanced Features
+- 🔍 Automatic VK group stream discovery
+- 📺 Live stream detection and monitoring
+- 🛑 Automatic monitoring termination when streams end
+- 📱 Direct user notifications for stream events
+- 🎬 Player-specific celebration videos
+- 📈 Stream status tracking and reporting
+
+### 🏗️ Modular Architecture
+- 🧩 Clean, modular code structure
+- 🔧 Centralized configuration management
+- 📝 Comprehensive error handling and logging
+- 🧪 Testable and maintainable codebase
+- 📚 Well-documented API and utilities
 
 ## Requirements
 
@@ -17,12 +32,14 @@ A Telegram bot that monitors VK (VKontakte) video translations (live streams) an
 - Telegram Bot Token
 - Telegram Channel (where the bot can post messages)
 - VK Access Token (optional but recommended)
+- VK Group ID (for automatic stream discovery)
 
 ## Installation
 
 1. **Clone the repository:**
    ```bash
-   cd /Users/alex/WebstormProjects/bu-text-translation
+   git clone <repository-url>
+   cd bu-text-translation
    ```
 
 2. **Create a virtual environment:**
@@ -46,6 +63,8 @@ A Telegram bot that monitors VK (VKontakte) video translations (live streams) an
      TELEGRAM_BOT_TOKEN=your_bot_token
      TELEGRAM_CHANNEL_ID=your_channel_id
      VK_ACCESS_TOKEN=your_vk_token
+     VK_GROUP=your_vk_group_id_or_url
+     MY_ID=your_telegram_user_id
      ```
 
 ## Configuration
@@ -77,64 +96,112 @@ A Telegram bot that monitors VK (VKontakte) video translations (live streams) an
 
 **Note:** Without a VK access token, you may have limited access to some videos, especially private ones.
 
+### 4. Get VK Group ID (for automatic stream discovery)
+
+1. Find your VK group URL (e.g., `https://vk.com/club123456789`)
+2. Add the group ID or URL to `.env` as `VK_GROUP`
+3. The bot will automatically monitor this group for new live streams
+
+### 5. Get Your Telegram User ID
+
+1. Send a message to [@userinfobot](https://t.me/userinfobot)
+2. Copy your user ID and add it to `.env` as `MY_ID`
+
 ## Usage
 
 1. **Start the bot:**
    ```bash
-   python bot.py
+   python main.py
    ```
 
 2. **Send commands to your bot on Telegram:**
 
    - `/start` - Show welcome message and available commands
    
-   - `/monitor <vk_url>` - Start monitoring a VK translation
+   - `/monitor <vk_url>` - Start monitoring a VK live stream
      ```
      Example:
      /monitor https://vk.com/video-123456789_456123789
      ```
    
-   - `/stop <vk_url>` - Stop monitoring a translation
+   - `/stop <vk_url>` - Stop monitoring a live stream
      ```
      Example:
      /stop https://vk.com/video-123456789_456123789
      ```
    
-   - `/list` - List all active translations being monitored
+   - `/list` - List all active streams being monitored
+   
+   - `/group_status` - Check VK group monitoring status
+   
+   - `/catch_existing` - Start monitoring any currently live streams in the group
 
 3. **The bot will:**
-   - Start checking the translation for new comments every minute
-   - Send new comments to your configured Telegram channel
-   - Automatically stop monitoring when the translation ends
-   - Notify you in the channel when monitoring starts/stops
+   - Automatically discover new live streams in your VK group
+   - Monitor streams for score comments (format: "1-0", "2-1 богомолов")
+   - Send celebration videos when your team scores
+   - Notify you when streams start and end
+   - Stop monitoring automatically when streams end
 
 ## How It Works
 
-1. You send the bot a VK translation (live stream) URL
-2. The bot parses the URL to extract video ID and owner ID
-3. It fetches existing comments to establish a baseline
-4. Every 60 seconds, it checks for new comments
-5. When new comments are detected, they are formatted and sent to your Telegram channel
-6. The bot also checks if the translation is still live
-7. When the translation ends, the bot stops monitoring and notifies you
+### 🎯 Score Detection System
+1. **Stream Monitoring**: Bot monitors VK live streams for new comments
+2. **Score Parsing**: Detects score comments in format "1-0", "2-1 богомолов"
+3. **Smart Filtering**: Only processes comments with valid score format
+4. **Celebration Videos**: Automatically attaches player-specific celebration videos
+5. **Real-time Updates**: Checks for new comments every 30 seconds
 
-## Comment Format
+### 🔍 Automatic Stream Discovery
+1. **Group Monitoring**: Continuously monitors VK group for new live streams
+2. **Stream Detection**: Automatically detects when new streams go live
+3. **Auto-Start**: Automatically begins monitoring new streams
+4. **End Detection**: Stops monitoring when streams end
 
-Comments are sent to your channel in the following format:
+### 📱 Notification System
+- **Score Updates**: Sends formatted score messages to Telegram channel
+- **Celebration Videos**: Attaches appropriate celebration videos based on player surname
+- **Stream Events**: Notifies user when streams start/end
+- **System Messages**: Provides monitoring status updates
+
+## Score Comment Format
+
+The bot detects and processes comments in the following formats:
 
 ```
-💬 New Comment
+1-0                    # Basic score
+2-1 богомолов          # Score with player surname
+3-0 писарев            # Score with different player
+```
 
-👤 [Author Name]
-🕐 [Date and Time]
+### 🎬 Celebration Videos
 
-[Comment Text]
+The bot includes celebration videos for specific players:
+- **богомолов/багич** → `celebrations/богомолов.mp4`
+- **заночуев** → `celebrations/заночуев.mp4`
+- **панферов/панфёров** → `celebrations/панферов.mp4`
+- **писарев/писарь** → `celebrations/писарев.mp4`
+- **шевченко/шева** → `celebrations/шевченко.mp4`
+- **Other players** → `celebrations/другие.mp4`
+
+## Message Format
+
+Score updates are sent to your channel in the following format:
+
+```
+⚽ Забиваем! Гол забил Богомолов. Счет: 2-1
+[Celebration Video Attachment]
+```
+
+For opponent goals:
+```
+Пропускаем. Счет: 1-1
 ```
 
 ## Troubleshooting
 
 ### Bot doesn't respond
-- Make sure the bot is running (`python bot.py`)
+- Make sure the bot is running (`python main.py`)
 - Check that your `TELEGRAM_BOT_TOKEN` is correct
 - Verify that you're sending commands to the correct bot
 
@@ -157,13 +224,45 @@ Comments are sent to your channel in the following format:
 
 ```
 bu-text-translation/
-├── bot.py              # Main bot application
-├── requirements.txt    # Python dependencies
-├── env.example        # Example environment configuration
-├── .env               # Your environment configuration (not in git)
-├── .gitignore         # Git ignore rules
-└── README.md          # This file
+├── main.py                    # Application entry point
+├── config/                    # Configuration management
+│   ├── __init__.py
+│   └── settings.py           # Environment variables & settings
+├── utils/                     # Common utilities
+│   ├── __init__.py
+│   └── url_parser.py         # URL parsing & score detection
+├── api/                       # External API integrations
+│   ├── __init__.py
+│   └── vk_client.py          # VK API wrapper
+├── handlers/                  # Telegram command handlers
+│   ├── __init__.py
+│   └── telegram_commands.py  # All bot commands
+├── monitors/                  # VK monitoring functionality
+│   ├── __init__.py
+│   ├── translation_monitor.py    # Individual stream monitoring
+│   └── group_stream_monitor.py  # Group stream discovery
+├── celebrations/              # Player celebration videos
+│   ├── богомолов.mp4
+│   ├── заночуев.mp4
+│   ├── панферов.mp4
+│   ├── писарев.mp4
+│   ├── шевченко.mp4
+│   └── другие.mp4
+├── requirements.txt           # Python dependencies
+├── env.example               # Example environment configuration
+├── bot_original.py           # Backup of original monolithic code
+└── README.md                 # This file
 ```
+
+### 🏗️ Architecture Overview
+
+- **`main.py`**: Application entry point and bot initialization
+- **`config/`**: Centralized configuration management with validation
+- **`utils/`**: Reusable utility functions for URL parsing and score detection
+- **`api/`**: Clean VK API wrapper with error handling
+- **`handlers/`**: All Telegram command implementations
+- **`monitors/`**: VK stream monitoring and group discovery logic
+- **`celebrations/`**: Player-specific celebration video files
 
 ## Dependencies
 
@@ -176,12 +275,35 @@ bu-text-translation/
 
 This project is provided as-is for personal use.
 
-## Notes
+## Bot Commands Reference
 
-- The bot checks for comments every 60 seconds. You can modify this interval in `bot.py` (line with `await asyncio.sleep(60)`)
-- The bot fetches up to 100 comments per check. For very active translations, some comments might be missed
-- Multiple translations can be monitored simultaneously
-- The bot uses VK API which has rate limits. Don't monitor too many translations at once
+### 📋 Available Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/start` | Show welcome message and available commands | `/start` |
+| `/monitor <url>` | Start monitoring a VK live stream | `/monitor https://vk.com/video-123456789_456123789` |
+| `/stop <url>` | Stop monitoring a specific stream | `/stop https://vk.com/video-123456789_456123789` |
+| `/list` | List all active streams being monitored | `/list` |
+| `/group_status` | Check VK group monitoring status | `/group_status` |
+| `/catch_existing` | Start monitoring any currently live streams in the group | `/catch_existing` |
+
+### 🎯 Score Detection Features
+
+- **Format Recognition**: Detects scores in format "1-0", "2-1 богомолов"
+- **Player Recognition**: Supports multiple player surname variations
+- **Smart Filtering**: Only processes valid score comments
+- **Celebration Videos**: Automatic video attachment based on player
+- **Real-time Updates**: 30-second monitoring intervals
+
+### 🔧 Technical Notes
+
+- The bot checks for comments every 30 seconds (improved from 60 seconds)
+- Fetches up to 100 comments per check for optimal performance
+- Multiple streams can be monitored simultaneously
+- VK API rate limits are respected with proper error handling
+- Automatic stream discovery with 15-second group polling
+- Comprehensive logging and error handling throughout
 
 ## Support
 

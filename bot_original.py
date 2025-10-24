@@ -422,21 +422,13 @@ class VKGroupStreamMonitor:
                 sort=2  # Sort by date (newest first)
             )
             
-            logger.info(f"VK API response: {videos}")
-            
-            if not videos:
-                logger.error("VK API returned None or empty response")
-                return
-            
-            if 'items' not in videos:
-                logger.error(f"VK API response missing 'items' key. Full response: {videos}")
+            if not videos or 'items' not in videos:
+                logger.warning("No videos found in group or access denied")
                 return
             
             if not videos['items']:
                 logger.warning("VK API returned empty items list")
                 return
-            
-            logger.info(f"Found {len(videos['items'])} videos in group")
             
             new_streams = []
             ended_streams = []
@@ -447,23 +439,19 @@ class VKGroupStreamMonitor:
                 live_status_str = video.get('live_status', '')
                 title = video.get('title', 'No title')
                 
-                logger.info(f"Video: {video_id}, Live: {live_status}, Live Status: {live_status_str}, Title: {title}")
-                
                 # Check if it's a live stream
                 if live_status == 1 or live_status_str == 'started':  # Live stream is active
                     if video_id not in self.seen_streams:
-                        logger.info(f"NEW LIVE STREAM DETECTED: {video_id}")
+                        logger.info(f"NEW LIVE STREAM DETECTED: {video_id} - {title}")
                         self.seen_streams.add(video_id)
                         new_streams.append(video)
                     else:
-                        logger.info(f"Live stream already seen: {video_id}")
+                        logger.debug(f"Live stream already seen: {video_id}")
                 elif (live_status == 2 or live_status_str == 'finished') and video_id in self.seen_streams:
                     # Stream ended
-                    logger.info(f"STREAM ENDED: {video_id} (live_status: {live_status_str})")
+                    logger.info(f"STREAM ENDED: {video_id} - {title}")
                     ended_streams.append(video)
                     self.seen_streams.discard(video_id)  # Remove from seen streams
-                else:
-                    logger.debug(f"Video is not live: {video_id} (live={live_status}, live_status={live_status_str})")
             
             logger.info(f"Found {len(new_streams)} new streams")
             logger.info(f"Found {len(ended_streams)} ended streams")
@@ -608,10 +596,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/stop <vk_translation_url> - Stop monitoring a translation\n"
         "/list - List active translations being monitored\n"
         "/group_status - Check VK group monitoring status\n"
-        "/debug_group - Debug VK group videos (shows all videos)\n"
-        "/catch_existing - Start monitoring any currently live streams\n"
-        "/test_vk - Test VK API connection\n"
-        "/start_existing - Start monitoring streams found during initialization\n\n"
+        "/catch_existing - Start monitoring any currently live streams\n\n"
         "Example:\n"
         "/monitor https://vk.com/video-123456789_456123789"
     )
@@ -712,88 +697,6 @@ async def group_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(message, parse_mode='HTML')
 
 
-async def debug_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /debug_group command - shows all videos in the group"""
-    global group_stream_monitor
-    
-    if not VK_GROUP:
-        await update.message.reply_text("❌ VK group monitoring is not configured")
-        return
-    
-    if not group_stream_monitor:
-        await update.message.reply_text("❌ VK group monitoring is not running")
-        return
-    
-    try:
-        # Extract group ID from URL if needed
-        extracted_group_id = extract_group_id(VK_GROUP)
-        logger.info(f"Debug: Original VK_GROUP: {VK_GROUP}")
-        logger.info(f"Debug: Extracted group ID: {extracted_group_id}")
-        
-        # Convert group_id to integer and make it negative for groups
-        owner_id = -int(extracted_group_id)
-        logger.info(f"Debug: Using owner_id: {owner_id}")
-        
-        # Get videos from the group
-        videos = group_stream_monitor.vk_api.video.get(
-            owner_id=owner_id,
-            count=20,
-            sort=2
-        )
-        
-        logger.info(f"Debug: VK API response: {videos}")
-        
-        if not videos:
-            logger.error("Debug: VK API returned None")
-            await update.message.reply_text("❌ VK API returned None")
-            return
-        
-        if 'items' not in videos:
-            logger.error(f"Debug: VK API response missing 'items' key. Full response: {videos}")
-            await update.message.reply_text(f"❌ VK API response missing 'items' key. Response: {videos}")
-            return
-        
-        if not videos['items']:
-            logger.warning("Debug: VK API returned empty items list")
-            await update.message.reply_text("❌ No videos found in group")
-            return
-        
-        message = f"🔍 <b>VK Group Debug - {len(videos['items'])} videos found:</b>\n\n"
-        
-        for i, video in enumerate(videos['items'][:10], 1):  # Show first 10 videos
-            video_id = f"{video['owner_id']}_{video['id']}"
-            live_status = video.get('live')
-            live_status_str = video.get('live_status', '')
-            title = video.get('title', 'No title')[:50]  # Limit title length
-            date = video.get('date', 0)
-            
-            # Format date
-            from datetime import datetime
-            date_str = datetime.fromtimestamp(date).strftime('%H:%M:%S') if date else 'Unknown'
-            
-            # Determine live status emoji
-            if live_status == 1 or live_status_str == 'started':
-                live_emoji = "🔴"
-            elif live_status == 2 or live_status_str == 'finished':
-                live_emoji = "⏹️"
-            else:
-                live_emoji = "⚫"
-            
-            seen_emoji = "✅" if video_id in group_stream_monitor.seen_streams else "❌"
-            
-            message += f"{i}. {live_emoji} {seen_emoji} {title}\n"
-            message += f"   ID: {video_id} | Live: {live_status} | Status: {live_status_str} | Time: {date_str}\n\n"
-        
-        if len(videos['items']) > 10:
-            message += f"... and {len(videos['items']) - 10} more videos"
-        
-        await update.message.reply_text(message, parse_mode='HTML')
-        
-    except Exception as e:
-        logger.error(f"Error in debug_group: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
 async def catch_existing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /catch_existing command - start monitoring any currently live streams"""
     global group_stream_monitor
@@ -809,12 +712,9 @@ async def catch_existing_command(update: Update, context: ContextTypes.DEFAULT_T
     try:
         # Extract group ID from URL if needed
         extracted_group_id = extract_group_id(VK_GROUP)
-        logger.info(f"Catch existing: Original VK_GROUP: {VK_GROUP}")
-        logger.info(f"Catch existing: Extracted group ID: {extracted_group_id}")
         
         # Convert group_id to integer and make it negative for groups
         owner_id = -int(extracted_group_id)
-        logger.info(f"Catch existing: Using owner_id: {owner_id}")
         
         # Get videos from the group
         videos = group_stream_monitor.vk_api.video.get(
@@ -878,149 +778,6 @@ async def catch_existing_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"❌ Error: {e}")
 
 
-async def test_vk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /test_vk command - test VK API connection"""
-    global group_stream_monitor
-    
-    if not VK_GROUP:
-        await update.message.reply_text("❌ VK_GROUP not configured")
-        return
-    
-    if not group_stream_monitor:
-        await update.message.reply_text("❌ VK group monitoring is not running")
-        return
-    
-    try:
-        # Extract group ID from URL if needed
-        extracted_group_id = extract_group_id(VK_GROUP)
-        logger.info(f"Test: Original VK_GROUP: {VK_GROUP}")
-        logger.info(f"Test: Extracted group ID: {extracted_group_id}")
-        
-        # Convert group_id to integer and make it negative for groups
-        owner_id = -int(extracted_group_id)
-        logger.info(f"Test: Using owner_id: {owner_id}")
-        
-        # Test basic API call
-        test_response = group_stream_monitor.vk_api.video.get(
-            owner_id=owner_id,
-            count=1
-        )
-        
-        logger.info(f"Test: VK API test response: {test_response}")
-        
-        if not test_response:
-            await update.message.reply_text("❌ VK API returned None")
-            return
-        
-        if 'error' in test_response:
-            error_msg = test_response['error']
-            await update.message.reply_text(f"❌ VK API Error: {error_msg}")
-            return
-        
-        if 'items' not in test_response:
-            await update.message.reply_text(f"❌ VK API response missing 'items'. Response: {test_response}")
-            return
-        
-        videos_count = len(test_response['items']) if test_response['items'] else 0
-        
-        message = (
-            f"✅ <b>VK API Test Results:</b>\n\n"
-            f"🔍 Group ID: {VK_GROUP}\n"
-            f"📺 Videos found: {videos_count}\n"
-            f"🔑 Token status: {'✅ Valid' if VK_ACCESS_TOKEN else '❌ No token'}\n\n"
-            f"📋 Full response: <code>{test_response}</code>"
-        )
-        
-        await update.message.reply_text(message, parse_mode='HTML')
-        
-    except Exception as e:
-        logger.error(f"Test: VK API test error: {e}")
-        await update.message.reply_text(f"❌ VK API test failed: {e}")
-
-
-async def start_existing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start_existing command - start monitoring streams that were found during initialization"""
-    global group_stream_monitor
-    
-    if not VK_GROUP:
-        await update.message.reply_text("❌ VK_GROUP not configured")
-        return
-    
-    if not group_stream_monitor:
-        await update.message.reply_text("❌ VK group monitoring is not running")
-        return
-    
-    try:
-        # Extract group ID from URL if needed
-        extracted_group_id = extract_group_id(VK_GROUP)
-        logger.info(f"Start existing: Original VK_GROUP: {VK_GROUP}")
-        logger.info(f"Start existing: Extracted group ID: {extracted_group_id}")
-        
-        # Convert group_id to integer and make it negative for groups
-        owner_id = -int(extracted_group_id)
-        logger.info(f"Start existing: Using owner_id: {owner_id}")
-        
-        # Get videos from the group
-        videos = group_stream_monitor.vk_api.video.get(
-            owner_id=owner_id,
-            count=20,
-            sort=2
-        )
-        
-        if not videos or 'items' not in videos:
-            await update.message.reply_text("❌ No videos found in group or access denied")
-            return
-        
-        live_streams = []
-        for video in videos['items']:
-            if video.get('live') == 1:  # Live stream is active
-                live_streams.append(video)
-        
-        if not live_streams:
-            await update.message.reply_text("❌ No live streams found in the group")
-            return
-        
-        message = f"🔴 Found {len(live_streams)} live stream(s):\n\n"
-        started_monitoring = 0
-        
-        for stream in live_streams:
-            stream_url = f"https://vk.com/video{stream['owner_id']}_{stream['id']}"
-            stream_title = stream.get('title', 'Live Stream')
-            video_id = f"{stream['owner_id']}_{stream['id']}"
-            
-            message += f"📺 {stream_title}\n🔗 {stream_url}\n\n"
-            
-            # Check if already monitoring this stream
-            if stream_url not in active_translations:
-                # Start monitoring this stream
-                monitor = VKTranslationMonitor(
-                    stream_url, 
-                    TELEGRAM_CHANNEL_ID, 
-                    context.application, 
-                    update.effective_user.id
-                )
-                active_translations[stream_url] = monitor
-                
-                # Start monitoring in background
-                asyncio.create_task(monitor.start_monitoring())
-                started_monitoring += 1
-                
-                logger.info(f"Started monitoring existing stream: {stream_url}")
-            else:
-                message += f"⚠️ Already monitoring: {stream_title}\n\n"
-        
-        if started_monitoring > 0:
-            message += f"✅ Started monitoring {started_monitoring} stream(s)"
-        else:
-            message += "ℹ️ All streams are already being monitored"
-        
-        await update.message.reply_text(message, parse_mode='HTML')
-        
-    except Exception as e:
-        logger.error(f"Error in start_existing: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
 def main():
     """Start the bot"""
     if not TELEGRAM_BOT_TOKEN:
@@ -1044,10 +801,7 @@ def main():
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("list", list_command))
     application.add_handler(CommandHandler("group_status", group_status_command))
-    application.add_handler(CommandHandler("debug_group", debug_group_command))
     application.add_handler(CommandHandler("catch_existing", catch_existing_command))
-    application.add_handler(CommandHandler("test_vk", test_vk_command))
-    application.add_handler(CommandHandler("start_existing", start_existing_command))
     
     # Start group stream monitoring if VK_GROUP is configured
     # We need to do this after the bot starts to have access to the event loop
