@@ -115,6 +115,11 @@ class VKGroupStreamMonitor:
                 f"Starting automatic monitoring..."
             )
             
+            # Send message to channel about new translation
+            await self.send_channel_message(
+                f"Ссылка на трансляцию матча: {stream_url}"
+            )
+            
             # Create and start monitoring the stream
             monitor = VKTranslationMonitor(
                 stream_url, 
@@ -173,6 +178,17 @@ class VKGroupStreamMonitor:
             )
         except Exception as e:
             logger.error(f"Error sending notification: {e}")
+    
+    async def send_channel_message(self, text: str):
+        """Send message to the Telegram channel."""
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.channel_id,
+                text=text,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Error sending channel message: {e}")
     
     async def start_polling(self):
         """Start polling for new streams every 15 seconds."""

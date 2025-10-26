@@ -184,6 +184,16 @@ async def catch_existing_command(update: Update, context: ContextTypes.DEFAULT_T
             
             # Check if already monitoring this stream
             if stream_url not in active_translations:
+                # Send message to channel about new translation
+                try:
+                    await context.application.bot.send_message(
+                        chat_id=config.TELEGRAM_CHANNEL_ID,
+                        text=f"Ссылка на трансляцию матча: {stream_url}",
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.error(f"Error sending channel message: {e}")
+                
                 # Start monitoring this stream
                 monitor = VKTranslationMonitor(
                     stream_url, 
