@@ -8,13 +8,14 @@ for score comments and sends notifications to Telegram channels.
 import asyncio
 import logging
 from datetime import datetime
-from typing import Set, Optional, Tuple
+from typing import Set, Optional, Tuple, List
 
 from telegram.ext import Application
 
 from api.vk_client import VKClient
 from utils.url_parser import parse_video_url, parse_score_comment, is_score_comment
 from config.settings import Config
+from services.gpt_service import GPTCommentaryService
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,16 @@ class VKTranslationMonitor:
         self.seen_comments: Set[int] = set()
         self.is_active = True
         self.current_score = (0, 0)  # (our_score, opponent_score)
+        self.message_history: List[str] = []  # Store previous score change messages
+        
+        # Initialize GPT service if available
+        self.gpt_service = None
+        try:
+            self.gpt_service = GPTCommentaryService()
+            logger.info("GPT commentary service initialized")
+        except Exception as e:
+            logger.warning(f"GPT service not available: {e}")
+            self.gpt_service = None
         
         # Parse URL and initialize VK client
         self.owner_id, self.video_id = parse_video_url(translation_url)
@@ -116,16 +127,34 @@ class VKTranslationMonitor:
             
             # Check if our team scored (first number increased)
             if our_score > previous_our_score:
-                message = f"⚽ Забиваем! Счет: {our_score}-{opponent_score}"
-                video_path = None
+                # Generate commentary using GPT if available
+                if self.gpt_service and self.gpt_service.is_available():
+                    new_score_str = f"{our_score}-{opponent_score}"
+                    gpt_message = self.gpt_service.generate_commentary(
+                        self.message_history, 
+                        new_score_str, 
+                        is_our_goal=True,
+                        scorer_surname=surname
+                    )
+                    if gpt_message:
+                        message = gpt_message
+                    else:
+                        # Fallback to default message if GPT fails
+                        message = f"⚽ Забиваем! Счет: {our_score}-{opponent_score}"
+                        if surname:
+                            surname_capitalized = surname.capitalize()
+                            message = f"⚽ Забиваем! Гол забил {surname_capitalized}. Счет: {our_score}-{opponent_score}"
+                else:
+                    # Use default message format
+                    message = f"⚽ Забиваем! Счет: {our_score}-{opponent_score}"
+                    if surname:
+                        surname_capitalized = surname.capitalize()
+                        message = f"⚽ Забиваем! Гол забил {surname_capitalized}. Счет: {our_score}-{opponent_score}"
                 
+                video_path = None
                 if surname:
-                    # Check surname in lowercase
+                    # Check surname in lowercase for video mapping
                     surname_lower = surname.lower()
-                    # Capitalize first letter of surname for display
-                    surname_capitalized = surname.capitalize()
-                    message = f"⚽ Забиваем! Гол забил {surname_capitalized}. Счет: {our_score}-{opponent_score}"
-                    
                     # Determine which video to attach based on surname
                     video_path = self._get_celebration_video_path(surname_lower)
                 
@@ -153,7 +182,24 @@ class VKTranslationMonitor:
                     )
             # Check if opponent scored (second number increased)
             elif opponent_score > previous_opponent_score:
-                message = f"Пропускаем. Счет: {our_score}-{opponent_score}"
+                # Generate commentary using GPT if available
+                if self.gpt_service and self.gpt_service.is_available():
+                    new_score_str = f"{our_score}-{opponent_score}"
+                    gpt_message = self.gpt_service.generate_commentary(
+                        self.message_history, 
+                        new_score_str, 
+                        is_our_goal=False,
+                        scorer_surname=None
+                    )
+                    if gpt_message:
+                        message = gpt_message
+                    else:
+                        # Fallback to default message if GPT fails
+                        message = f"Пропускаем. Счет: {our_score}-{opponent_score}"
+                else:
+                    # Use default message format
+                    message = f"Пропускаем. Счет: {our_score}-{opponent_score}"
+                
                 await self.app.bot.send_message(
                     chat_id=self.channel_id,
                     text=message,
@@ -166,6 +212,13 @@ class VKTranslationMonitor:
             
             # Update current score
             self.current_score = (our_score, opponent_score)
+            
+            # Store message in history for future GPT context
+            self.message_history.append(message)
+            
+            # Keep only last 10 messages to avoid context overflow
+            if len(self.message_history) > 10:
+                self.message_history = self.message_history[-10:]
             
             logger.info(f"Posted score update: {message}")
             

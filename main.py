@@ -43,6 +43,13 @@ def main():
         application.add_handler(CommandHandler("group_status", group_status_command))
         application.add_handler(CommandHandler("catch_existing", catch_existing_command))
         
+        # Add error handler
+        async def error_handler(update, context):
+            """Handle errors."""
+            logger.error(f"Update {update} caused error {context.error}")
+        
+        application.add_error_handler(error_handler)
+        
         # Setup post-initialization
         async def post_init(application):
             """Post-initialization setup for group monitoring."""

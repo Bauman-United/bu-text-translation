@@ -27,6 +27,9 @@ class Config:
         self.VK_ACCESS_TOKEN = os.getenv('VK_ACCESS_TOKEN')
         self.VK_GROUP = os.getenv('VK_GROUP')
         
+        # OpenAI Configuration
+        self.OPENAI_KEY = os.getenv('OPENAI_KEY')
+        
         # Validate required configuration
         self._validate_config()
         
@@ -55,6 +58,9 @@ class Config:
         
         if not self.VK_GROUP:
             logging.warning("VK_GROUP not configured, group stream monitoring will be disabled")
+        
+        if not self.OPENAI_KEY:
+            logging.warning("OPENAI_KEY not provided, GPT commentary will be disabled")
     
     def _setup_logging(self):
         """Configure application logging."""
@@ -73,3 +79,8 @@ class Config:
     def is_group_monitoring_configured(self) -> bool:
         """Check if VK group monitoring is configured."""
         return bool(self.VK_GROUP)
+    
+    @property
+    def is_openai_configured(self) -> bool:
+        """Check if OpenAI is properly configured."""
+        return bool(self.OPENAI_KEY)
