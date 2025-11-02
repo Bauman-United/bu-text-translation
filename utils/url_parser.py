@@ -86,7 +86,7 @@ def parse_video_url(translation_url: str) -> tuple:
 
 def is_score_comment(text: str) -> bool:
     """
-    Check if comment contains score information in format: {number}-{number} {surname}.
+    Check if comment contains score information in format: {number}-{number} or {number}:{number} {surname}.
     
     Args:
         text: Comment text to check
@@ -98,6 +98,12 @@ def is_score_comment(text: str) -> bool:
         >>> is_score_comment("1-0")
         True
         >>> is_score_comment("2-1 богомолов")
+        True
+        >>> is_score_comment("1:1")
+        True
+        >>> is_score_comment("2:1 богомолов")
+        True
+        >>> is_score_comment("1-1 богомолов.")
         True
         >>> is_score_comment("Hello world")
         False
@@ -120,10 +126,18 @@ def parse_score_comment(text: str) -> tuple:
         (1, 0, "")
         >>> parse_score_comment("2-1 богомолов")
         (2, 1, "богомолов")
+        >>> parse_score_comment("1:1")
+        (1, 1, "")
+        >>> parse_score_comment("2:1 богомолов")
+        (2, 1, "богомолов")
+        >>> parse_score_comment("1-1 богомолов.")
+        (1, 1, "богомолов")
+        >>> parse_score_comment("2:1.")
+        (2, 1, "")
     """
-    # Pattern: digits-digits (optional surname)
-    # Examples: "1-0", "0-1", "1-0 богомолов", "2-1 писарев"
-    score_pattern = r'^(\d+)-(\d+)(?:\s+(\w+))?$'
+    # Pattern: digits-digits or digits:digits (optional surname, optional trailing punctuation)
+    # Examples: "1-0", "0-1", "1:1", "1-0 богомолов", "2-1 писарев", "2:1 богомолов", "1-1 богомолов."
+    score_pattern = r'^(\d+)[-:](\d+)(?:\s+(\w+))?[\.!?]?$'
     match = re.match(score_pattern, text.strip())
     if match:
         our_score = int(match.group(1))
