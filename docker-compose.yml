@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: vk-translation-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mount .env file if you prefer to keep it outside container
+      # - ./.env:/app/.env:ro
+      # Mount logs directory if you want to persist logs
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Uncomment if you need to specify a network
+    # networks:
+    #   - bot-network
+
+# Uncomment if you need a network
+# networks:
+#   bot-network:
+#     driver: bridge
+
