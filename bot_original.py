@@ -671,8 +671,6 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def group_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /group_status command"""
-    global group_stream_monitor
-    
     if not VK_GROUP:
         await update.message.reply_text("❌ VK group monitoring is not configured")
         return
@@ -699,8 +697,6 @@ async def group_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def catch_existing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /catch_existing command - start monitoring any currently live streams"""
-    global group_stream_monitor
-    
     if not VK_GROUP:
         await update.message.reply_text("❌ VK group monitoring is not configured")
         return
