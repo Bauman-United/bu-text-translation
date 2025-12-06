@@ -53,15 +53,55 @@ class VKGroupStreamMonitor:
         try:
             logger.info(f"Checking for new streams in group {self.group_id}")
             
-            # Get videos from the group
-            videos = self.vk_client.get_group_videos(self.group_id, count=20)
+            # Get videos from the group - request more to ensure we catch all live streams
+            videos = self.vk_client.get_group_videos(self.group_id, count=50)
             
             if not videos:
                 logger.warning("No videos found in group or access denied")
                 return True
             
+            # Always check ALL videos individually to get fresh data
+            # The list API might return stale data, so we need to verify each video
+            # This ensures we catch live streams even if they're not at the top of the list
+            logger.info(f"Checking {len(videos)} videos individually for live status...")
+            for video in videos:
+                video_id = self.vk_client.get_video_id(video)
+                # Always check individually to get the most up-to-date status
+                try:
+                    detailed_info = self.vk_client.get_video_info(
+                        str(video['owner_id']), 
+                        str(video['id'])
+                    )
+                    if detailed_info:
+                        # Update video with detailed info (this includes fresh live status)
+                        old_live = video.get('live')
+                        old_live_status = video.get('live_status')
+                        video.update(detailed_info)
+                        new_live = detailed_info.get('live')
+                        new_live_status = detailed_info.get('live_status')
+                        new_is_mobile_live = detailed_info.get('is_mobile_live')
+                        # Only log if status changed or if it's a live stream
+                        if (old_live != new_live or old_live_status != new_live_status or 
+                            new_live == 1 or new_live_status == 'started' or new_is_mobile_live):
+                            logger.info(f"Video {video_id}: live={new_live}, live_status={new_live_status}, is_mobile_live={new_is_mobile_live}")
+                except Exception as e:
+                    logger.debug(f"Could not check video {video_id} individually: {e}")
+            
             new_streams = []
             ended_streams = []
+            
+            # Debug: log all videos to see what we're getting
+            logger.info(f"Retrieved {len(videos)} videos from group")
+            for idx, video in enumerate(videos[:5]):  # Log first 5 videos for debugging
+                video_id = self.vk_client.get_video_id(video)
+                title = video.get('title', 'No title')
+                live = video.get('live')
+                live_status = video.get('live_status', '')
+                # Log all video fields to understand structure
+                if idx == 0:
+                    logger.info(f"First video structure: {list(video.keys())}")
+                is_mobile_live = video.get('is_mobile_live', False)
+                logger.info(f"Video {idx+1}: id={video_id}, title={title[:50]}, live={live}, live_status={live_status}, is_mobile_live={is_mobile_live}, type={video.get('type', 'N/A')}")
             
             for video in videos:
                 video_id = self.vk_client.get_video_id(video)

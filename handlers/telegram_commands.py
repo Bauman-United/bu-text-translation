@@ -7,9 +7,10 @@ and interact with the monitoring system.
 
 import asyncio
 import logging
+import hashlib
 from typing import Dict, Any
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from config.settings import Config
@@ -106,10 +107,26 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     message = "📊 Active translations:\n\n"
-    for i, url in enumerate(active_translations.keys(), 1):
-        message += f"{i}. {url}\n"
+    keyboard = []
     
-    await update.message.reply_text(message)
+    for i, url in enumerate(active_translations.keys(), 1):
+        # Truncate URL for display if too long
+        display_url = url if len(url) <= 50 else url[:47] + "..."
+        message += f"{i}. {display_url}\n"
+        
+        # Create a hash of the URL for callback data (Telegram has 64-byte limit)
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        callback_data = f"remove:{url_hash}"
+        
+        # Store the mapping globally for later retrieval
+        url_hash_to_url[url_hash] = url
+        
+        # Add button for each translation
+        keyboard.append([InlineKeyboardButton(f"🗑️ Remove {i}", callback_data=callback_data)])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(message, reply_markup=reply_markup)
 
 
 async def group_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -238,3 +255,80 @@ def set_group_stream_monitor(monitor: VKGroupStreamMonitor):
     """Set the group stream monitor instance."""
     global group_stream_monitor
     group_stream_monitor = monitor
+
+
+# Global mapping to store URL hashes (for callback queries)
+url_hash_to_url: Dict[str, str] = {}
+
+
+async def remove_translation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle callback query for removing a translation."""
+    query = update.callback_query
+    
+    # Answer the callback query to remove loading state
+    await query.answer()
+    
+    if not query.data or not query.data.startswith("remove:"):
+        await query.edit_message_text("❌ Invalid callback data")
+        return
+    
+    # Extract hash from callback data
+    url_hash = query.data.split(":", 1)[1]
+    
+    # Find the URL from the hash mapping
+    translation_url = url_hash_to_url.get(url_hash)
+    
+    if not translation_url:
+        # Fallback: try to find it in active_translations by matching hash
+        for url in active_translations.keys():
+            if hashlib.md5(url.encode()).hexdigest() == url_hash:
+                translation_url = url
+                break
+    
+    if not translation_url:
+        await query.edit_message_text("❌ Translation not found")
+        return
+    
+    if translation_url not in active_translations:
+        await query.edit_message_text("⚠️ Translation is not being monitored")
+        return
+    
+    # Stop the monitor
+    monitor = active_translations[translation_url]
+    monitor.is_active = False
+    
+    # Remove from active translations
+    del active_translations[translation_url]
+    
+    # Clean up hash mapping
+    if url_hash in url_hash_to_url:
+        del url_hash_to_url[url_hash]
+    
+    # Update the message to show it was removed
+    removed_url = translation_url if len(translation_url) <= 50 else translation_url[:47] + "..."
+    
+    if active_translations:
+        # If there are still translations, show updated list
+        # Clear old hash mappings and rebuild from current active translations
+        url_hash_to_url.clear()
+        
+        message = "📊 Active translations:\n\n"
+        keyboard = []
+        
+        for i, url in enumerate(active_translations.keys(), 1):
+            display_url = url if len(url) <= 50 else url[:47] + "..."
+            message += f"{i}. {display_url}\n"
+            
+            url_hash = hashlib.md5(url.encode()).hexdigest()
+            callback_data = f"remove:{url_hash}"
+            url_hash_to_url[url_hash] = url
+            
+            keyboard.append([InlineKeyboardButton(f"🗑️ Remove {i}", callback_data=callback_data)])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup)
+    else:
+        await query.edit_message_text(
+            f"✅ Removed translation:\n{removed_url}\n\n"
+            f"📭 No active translations remaining"
+        )

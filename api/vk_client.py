@@ -112,7 +112,7 @@ class VKClient:
     
     def get_group_videos(self, group_id: str, count: int = 20) -> List[Dict]:
         """
-        Get videos from a VK group.
+        Get videos from a VK group using multiple methods.
         
         Args:
             group_id: VK group ID
@@ -121,6 +121,8 @@ class VKClient:
         Returns:
             List of video dictionaries
         """
+        all_videos = []
+        
         try:
             # Check if we have access token for group operations
             if not self.access_token or not self.access_token.strip():
@@ -131,17 +133,60 @@ class VKClient:
             owner_id = -int(group_id)
             logger.info(f"Getting videos for group {group_id} (owner_id: {owner_id})")
             
-            videos = self.vk_api.video.get(
-                owner_id=owner_id,  # Negative integer for groups
-                count=count,
-                sort=2  # Sort by date (newest first)
-            )
+            # Method 1: Get videos from video.get() (videos uploaded to group's video section)
+            try:
+                videos = self.vk_api.video.get(
+                    owner_id=owner_id,  # Negative integer for groups
+                    count=count,
+                    sort=2  # Sort by date (newest first)
+                )
+                
+                if videos and 'items' in videos:
+                    all_videos.extend(videos['items'])
+                    logger.info(f"Found {len(videos['items'])} videos from video.get() with owner_id={owner_id}")
+            except Exception as e:
+                logger.warning(f"Error getting videos from video.get() with owner_id: {e}")
             
-            if not videos or 'items' not in videos:
+            
+            # Method 2: Get videos from wall posts (live streams are often posted on wall)
+            try:
+                wall_posts = self.vk_api.wall.get(
+                    owner_id=owner_id,
+                    count=min(count * 2, 100),  # Get more posts to find videos
+                    filter='all'  # Get all posts, not just owner's
+                )
+                
+                if wall_posts and 'items' in wall_posts:
+                    wall_videos = []
+                    for post in wall_posts['items']:
+                        # Check for video attachments in the post
+                        attachments = post.get('attachments', [])
+                        for attachment in attachments:
+                            if attachment.get('type') == 'video':
+                                video_data = attachment.get('video', {})
+                                if video_data:
+                                    # Ensure we have owner_id and id
+                                    if 'owner_id' not in video_data:
+                                        video_data['owner_id'] = owner_id
+                                    wall_videos.append(video_data)
+                    
+                    if wall_videos:
+                        logger.info(f"Found {len(wall_videos)} videos from wall posts")
+                        # Add wall videos that aren't already in all_videos
+                        existing_ids = {f"{v['owner_id']}_{v['id']}" for v in all_videos}
+                        for wall_video in wall_videos:
+                            video_id_str = f"{wall_video['owner_id']}_{wall_video['id']}"
+                            if video_id_str not in existing_ids:
+                                all_videos.append(wall_video)
+            except Exception as e:
+                logger.warning(f"Error getting videos from wall posts: {e}")
+            
+            if not all_videos:
                 logger.warning("No videos found in group or access denied")
                 return []
             
-            return videos['items']
+            logger.info(f"Total unique videos found: {len(all_videos)}")
+            return all_videos
             
         except vk_api.exceptions.ApiError as e:
             logger.error(f"VK API error getting group videos: {e}")
@@ -162,9 +207,30 @@ class VKClient:
         """
         live_status = video.get('live')
         live_status_str = video.get('live_status', '')
+        is_mobile_live = video.get('is_mobile_live', False)
         
-        # Check if it's a live stream
-        return live_status == 1 or live_status_str == 'started'
+        # Primary check: live field == 1 or live_status == 'started'
+        # live can be: None (not a stream), 1 (live), 2 (finished)
+        # live_status can be: '' (not a stream), 'started' (live), 'finished' (ended)
+        is_live = live_status == 1 or live_status_str == 'started'
+        
+        # Additional check: is_mobile_live indicates a mobile live stream
+        # BUT only trust it if live_status is NOT 'finished' (to avoid false positives on old streams)
+        if is_mobile_live and live_status_str != 'finished':
+            is_live = True
+            logger.info(f"Video {video.get('id')} detected as live via is_mobile_live=True (live_status={live_status_str})")
+        
+        # Additional check: if live field exists and is 1, it's definitely live
+        # Also check if the video type indicates it's a live stream
+        video_type = video.get('type', '')
+        if video_type == 'live' or (live_status is not None and live_status == 1):
+            is_live = True
+        
+        # If live_status is explicitly 'finished', it's not live (even if is_mobile_live is True)
+        if live_status_str == 'finished' and live_status != 1:
+            is_live = False
+        
+        return is_live
     
     def is_stream_ended(self, video: Dict) -> bool:
         """
