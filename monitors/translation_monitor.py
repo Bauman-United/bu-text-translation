@@ -287,7 +287,7 @@ class VKTranslationMonitor:
         await self.send_system_message(
             f"✅ Started monitoring VK translation\n"
             f"🔗 {self.translation_url}\n"
-            f"⏱ Checking every 30 seconds"
+            f"⏱ Checking every 15 seconds"
         )
         
         # Initial check to populate seen_comments
@@ -305,9 +305,9 @@ class VKTranslationMonitor:
                 is_active = await self.check_comments()
                 if not is_active:
                     break
-                await asyncio.sleep(30)  # Check every 30 seconds
+                await asyncio.sleep(15)  # Check every 15 seconds
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
-                await asyncio.sleep(30)
+                await asyncio.sleep(15)
         
         logger.info(f"Stopped monitoring {self.translation_url}")
