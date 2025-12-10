@@ -291,6 +291,49 @@ class VKTranslationMonitor:
         except Exception as e:
             logger.error(f"Error sending notification to user: {e}")
     
+    async def process_existing_comments(self):
+        """
+        Process existing comments when starting monitoring.
+        This ensures we catch up on any score updates that happened before monitoring started.
+        We track the current score but don't send notifications for old comments to avoid spam.
+        """
+        try:
+            logger.info(f"Processing existing comments for {self.translation_url}")
+            comments = await self.vk_client.get_video_comments(self.owner_id, self.video_id)
+            
+            if not comments:
+                logger.info("No existing comments found")
+                return
+            
+            # Process comments in reverse order (oldest first) to track score progression correctly
+            # Comments from VK API are typically in reverse chronological order (newest first)
+            comments_reversed = list(reversed(comments))
+            
+            score_comments_processed = 0
+            for comment in comments_reversed:
+                comment_id = comment['id']
+                self.seen_comments.add(comment_id)
+                
+                # Process score comments to update current score (but don't send notifications)
+                text = comment.get('text', '')
+                if is_score_comment(text):
+                    score_data = parse_score_comment(text)
+                    if score_data:
+                        our_score, opponent_score, surname = score_data
+                        # Update current score to track the latest score from existing comments
+                        # We only update if this score is higher (more recent)
+                        if our_score > self.current_score[0] or opponent_score > self.current_score[1]:
+                            self.current_score = (our_score, opponent_score)
+                            score_comments_processed += 1
+                            logger.debug(f"Updated score from existing comment: {our_score}-{opponent_score}")
+            
+            logger.info(f"Processed {len(comments)} existing comments ({score_comments_processed} score comments)")
+            if self.current_score != (0, 0):
+                logger.info(f"Current score initialized from existing comments: {self.current_score[0]}-{self.current_score[1]}")
+            
+        except Exception as e:
+            logger.error(f"Error processing existing comments: {e}")
+    
     async def start_monitoring(self):
         """Start monitoring the translation."""
         logger.info(f"Starting monitoring for {self.translation_url}")
@@ -300,14 +343,8 @@ class VKTranslationMonitor:
             f"⏱ Checking every 30 seconds"
         )
         
-        # Initial check to populate seen_comments
-        try:
-            comments = await self.vk_client.get_video_comments(self.owner_id, self.video_id)
-            for comment in comments:
-                self.seen_comments.add(comment['id'])
-            logger.info(f"Initialized with {len(self.seen_comments)} existing comments")
-        except Exception as e:
-            logger.error(f"Error during initial check: {e}")
+        # Process existing comments to catch up on score updates
+        await self.process_existing_comments()
         
         # Start monitoring loop
         while self.is_active:

@@ -244,15 +244,34 @@ class VKGroupStreamMonitor:
             f"⏱ Checking every 15 seconds"
         )
         
-        # Initial check to populate seen_streams
+        # Initial check to populate seen_streams and process existing streams
         try:
-            videos = await self.vk_client.get_group_videos(self.group_id, count=20)
+            videos = await self.vk_client.get_group_videos(self.group_id, count=50)
             if videos:
+                existing_streams = []
                 for video in videos:
+                    # Check individually to get fresh live status
+                    try:
+                        detailed_info = await self.vk_client.get_video_info(
+                            str(video['owner_id']), 
+                            str(video['id'])
+                        )
+                        if detailed_info:
+                            video.update(detailed_info)
+                    except Exception as e:
+                        logger.debug(f"Could not check video individually: {e}")
+                    
                     if self.vk_client.is_live_stream(video):
                         video_id = self.vk_client.get_video_id(video)
                         self.seen_streams.add(video_id)
-                logger.info(f"Initialized with {len(self.seen_streams)} existing live streams")
+                        existing_streams.append(video)
+                
+                logger.info(f"Found {len(existing_streams)} existing live streams")
+                
+                # Process existing streams - start monitoring them and process their comments
+                for stream in existing_streams:
+                    await self.handle_new_stream(stream)
+                    
         except Exception as e:
             logger.error(f"Error during initial stream check: {e}")
         
