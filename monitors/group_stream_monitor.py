@@ -15,6 +15,7 @@ from api.vk_client import VKClient
 from utils.url_parser import extract_group_id
 from monitors.translation_monitor import VKTranslationMonitor
 from config.settings import Config
+from utils.error_notifier import send_error_notification
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,12 @@ class VKGroupStreamMonitor:
         
         # Initialize VK client with access token
         config = Config()
-        self.vk_client = VKClient(config.VK_ACCESS_TOKEN)
+        
+        # Create error notifier for VK client
+        async def vk_error_notifier(service_name, request_info, error_code, error_message):
+            await send_error_notification(self.app, self.user_id, service_name, request_info, error_code, error_message)
+        
+        self.vk_client = VKClient(config.VK_ACCESS_TOKEN, error_notifier=vk_error_notifier)
     
     async def check_for_new_streams(self) -> bool:
         """
@@ -54,7 +60,7 @@ class VKGroupStreamMonitor:
             logger.info(f"Checking for new streams in group {self.group_id}")
             
             # Get videos from the group - request more to ensure we catch all live streams
-            videos = self.vk_client.get_group_videos(self.group_id, count=50)
+            videos = await self.vk_client.get_group_videos(self.group_id, count=50)
             
             if not videos:
                 logger.warning("No videos found in group or access denied")
@@ -68,7 +74,7 @@ class VKGroupStreamMonitor:
                 video_id = self.vk_client.get_video_id(video)
                 # Always check individually to get the most up-to-date status
                 try:
-                    detailed_info = self.vk_client.get_video_info(
+                    detailed_info = await self.vk_client.get_video_info(
                         str(video['owner_id']), 
                         str(video['id'])
                     )
@@ -240,7 +246,7 @@ class VKGroupStreamMonitor:
         
         # Initial check to populate seen_streams
         try:
-            videos = self.vk_client.get_group_videos(self.group_id, count=20)
+            videos = await self.vk_client.get_group_videos(self.group_id, count=20)
             if videos:
                 for video in videos:
                     if self.vk_client.is_live_stream(video):

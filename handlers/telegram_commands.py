@@ -174,7 +174,7 @@ async def catch_existing_command(update: Update, context: ContextTypes.DEFAULT_T
         extracted_group_id = extract_group_id(config.VK_GROUP)
         
         # Get videos from the group
-        videos = group_stream_monitor.vk_client.get_group_videos(extracted_group_id, count=20)
+        videos = await group_stream_monitor.vk_client.get_group_videos(extracted_group_id, count=20)
         
         if not videos:
             await update.message.reply_text("❌ No videos found in group or access denied")

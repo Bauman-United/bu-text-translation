@@ -6,7 +6,7 @@ using OpenAI's GPT models for the Bauman United football team.
 """
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Callable, Awaitable
 from openai import OpenAI
 from config.settings import Config
 
@@ -16,16 +16,22 @@ logger = logging.getLogger(__name__)
 class GPTCommentaryService:
     """Service for generating sports commentary using OpenAI GPT."""
     
-    def __init__(self):
-        """Initialize the GPT service."""
+    def __init__(self, error_notifier: Optional[Callable[[str, str, Optional[str], str], Awaitable[None]]] = None):
+        """
+        Initialize the GPT service.
+        
+        Args:
+            error_notifier: Async function to call when errors occur: (service_name, request_info, error_code, error_message)
+        """
         self.config = Config()
         if not self.config.is_openai_configured:
             raise ValueError("OpenAI API key not configured")
         
         self.client = OpenAI(api_key=self.config.OPENAI_KEY)
         self.model = "gpt-4"  # Using GPT-4 for better quality
+        self.error_notifier = error_notifier
     
-    def generate_commentary(
+    async def generate_commentary(
         self, 
         previous_messages: List[str], 
         new_score: str, 
@@ -237,6 +243,16 @@ class GPTCommentaryService:
             
         except Exception as e:
             logger.error(f"Error generating commentary: {e}")
+            request_info = f"chat.completions.create(model={self.model}, messages=[...])"
+            error_code = None
+            # Try to extract error code from OpenAI exception
+            if hasattr(e, 'status_code'):
+                error_code = str(e.status_code)
+            elif hasattr(e, 'code'):
+                error_code = str(e.code)
+            
+            if self.error_notifier:
+                await self.error_notifier("OpenAI API", request_info, error_code, str(e))
             return None
     
     def is_available(self) -> bool:

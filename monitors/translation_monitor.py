@@ -16,6 +16,7 @@ from api.vk_client import VKClient
 from utils.url_parser import parse_video_url, parse_score_comment, is_score_comment
 from config.settings import Config
 from services.gpt_service import GPTCommentaryService
+from utils.error_notifier import send_error_notification
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,11 @@ class VKTranslationMonitor:
         # Initialize GPT service if available
         self.gpt_service = None
         try:
-            self.gpt_service = GPTCommentaryService()
+            # Create error notifier for GPT service
+            async def gpt_error_notifier(service_name, request_info, error_code, error_message):
+                await send_error_notification(self.app, self.user_id, service_name, request_info, error_code, error_message)
+            
+            self.gpt_service = GPTCommentaryService(error_notifier=gpt_error_notifier)
             logger.info("GPT commentary service initialized")
         except Exception as e:
             logger.warning(f"GPT service not available: {e}")
@@ -54,7 +59,12 @@ class VKTranslationMonitor:
         # Parse URL and initialize VK client
         self.owner_id, self.video_id = parse_video_url(translation_url)
         config = Config()
-        self.vk_client = VKClient(config.VK_ACCESS_TOKEN)
+        
+        # Create error notifier for VK client
+        async def vk_error_notifier(service_name, request_info, error_code, error_message):
+            await send_error_notification(self.app, self.user_id, service_name, request_info, error_code, error_message)
+        
+        self.vk_client = VKClient(config.VK_ACCESS_TOKEN, error_notifier=vk_error_notifier)
     
     async def check_comments(self) -> bool:
         """
@@ -65,7 +75,7 @@ class VKTranslationMonitor:
         """
         try:
             # Get video information
-            video_info = self.vk_client.get_video_info(self.owner_id, self.video_id)
+            video_info = await self.vk_client.get_video_info(self.owner_id, self.video_id)
             
             if not video_info:
                 logger.error("Video not found or access denied")
@@ -87,7 +97,7 @@ class VKTranslationMonitor:
                 return False
             
             # Get comments
-            comments = self.vk_client.get_video_comments(self.owner_id, self.video_id)
+            comments = await self.vk_client.get_video_comments(self.owner_id, self.video_id)
             
             new_comments = []
             for comment in comments:
@@ -130,7 +140,7 @@ class VKTranslationMonitor:
                 # Generate commentary using GPT if available
                 if self.gpt_service and self.gpt_service.is_available():
                     new_score_str = f"{our_score}-{opponent_score}"
-                    gpt_message = self.gpt_service.generate_commentary(
+                    gpt_message = await self.gpt_service.generate_commentary(
                         self.message_history, 
                         new_score_str, 
                         is_our_goal=True,
@@ -185,7 +195,7 @@ class VKTranslationMonitor:
                 # Generate commentary using GPT if available
                 if self.gpt_service and self.gpt_service.is_available():
                     new_score_str = f"{our_score}-{opponent_score}"
-                    gpt_message = self.gpt_service.generate_commentary(
+                    gpt_message = await self.gpt_service.generate_commentary(
                         self.message_history, 
                         new_score_str, 
                         is_our_goal=False,
@@ -287,12 +297,12 @@ class VKTranslationMonitor:
         await self.send_system_message(
             f"✅ Started monitoring VK translation\n"
             f"🔗 {self.translation_url}\n"
-            f"⏱ Checking every 15 seconds"
+            f"⏱ Checking every 30 seconds"
         )
         
         # Initial check to populate seen_comments
         try:
-            comments = self.vk_client.get_video_comments(self.owner_id, self.video_id)
+            comments = await self.vk_client.get_video_comments(self.owner_id, self.video_id)
             for comment in comments:
                 self.seen_comments.add(comment['id'])
             logger.info(f"Initialized with {len(self.seen_comments)} existing comments")
@@ -305,9 +315,9 @@ class VKTranslationMonitor:
                 is_active = await self.check_comments()
                 if not is_active:
                     break
-                await asyncio.sleep(15)  # Check every 15 seconds
+                await asyncio.sleep(30)  # Check every 30 seconds
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
-                await asyncio.sleep(15)
+                await asyncio.sleep(30)
         
         logger.info(f"Stopped monitoring {self.translation_url}")

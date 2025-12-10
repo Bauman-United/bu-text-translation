@@ -7,24 +7,37 @@ API calls, and error handling for VK-related operations.
 
 import vk_api
 import logging
-from typing import Dict, List, Optional, Tuple
+import asyncio
+import sys
+from typing import Dict, List, Optional, Tuple, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
+
+# Compatibility: asyncio.to_thread was added in Python 3.9
+if sys.version_info >= (3, 9):
+    _run_in_thread = asyncio.to_thread
+else:
+    # Fallback for Python 3.7-3.8
+    def _run_in_thread(func, *args, **kwargs):
+        loop = asyncio.get_event_loop()
+        return loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 
 class VKClient:
     """VK API client wrapper."""
     
-    def __init__(self, access_token: Optional[str] = None):
+    def __init__(self, access_token: Optional[str] = None, error_notifier: Optional[Callable[[str, str, Optional[str], str], Awaitable[None]]] = None):
         """
         Initialize VK API client.
         
         Args:
             access_token: VK API access token (optional, will use anonymous access if not provided)
+            error_notifier: Async function to call when errors occur: (request_info, error_code, error_message)
         """
         self.access_token = access_token
         self.vk_session = None
         self.vk_api = None
+        self.error_notifier = error_notifier
         self._initialize_vk()
     
     def _initialize_vk(self):
@@ -38,7 +51,7 @@ class VKClient:
             self.vk_session = vk_api.VkApi()
             self.vk_api = self.vk_session.get_api()
     
-    def get_video_info(self, owner_id: str, video_id: str) -> Optional[Dict]:
+    async def get_video_info(self, owner_id: str, video_id: str) -> Optional[Dict]:
         """
         Get video information from VK.
         
@@ -55,7 +68,9 @@ class VKClient:
                 logger.error("VK_ACCESS_TOKEN required for video operations")
                 raise ValueError("VK_ACCESS_TOKEN is required for video operations")
             
-            video_info = self.vk_api.video.get(
+            # Run blocking vk_api call in thread pool to avoid blocking event loop
+            video_info = await _run_in_thread(
+                self.vk_api.video.get,
                 owner_id=owner_id,
                 videos=f"{owner_id}_{video_id}"
             )
@@ -68,12 +83,20 @@ class VKClient:
             
         except vk_api.exceptions.ApiError as e:
             logger.error(f"VK API error getting video info: {e}")
+            error_code = getattr(e, 'code', None)
+            error_code_str = str(error_code) if error_code is not None else None
+            request_info = f"video.get(owner_id={owner_id}, videos={owner_id}_{video_id})"
+            if self.error_notifier:
+                await self.error_notifier("VK API", request_info, error_code_str, str(e))
             raise
         except Exception as e:
             logger.error(f"Error getting video info: {e}")
+            request_info = f"video.get(owner_id={owner_id}, videos={owner_id}_{video_id})"
+            if self.error_notifier:
+                await self.error_notifier("VK API", request_info, None, str(e))
             raise
     
-    def get_video_comments(self, owner_id: str, video_id: str, count: int = 100) -> List[Dict]:
+    async def get_video_comments(self, owner_id: str, video_id: str, count: int = 100) -> List[Dict]:
         """
         Get comments for a video.
         
@@ -91,7 +114,9 @@ class VKClient:
                 logger.error("VK_ACCESS_TOKEN required for comment operations")
                 raise ValueError("VK_ACCESS_TOKEN is required for comment operations")
             
-            comments = self.vk_api.video.getComments(
+            # Run blocking vk_api call in thread pool to avoid blocking event loop
+            comments = await _run_in_thread(
+                self.vk_api.video.getComments,
                 owner_id=owner_id,
                 video_id=video_id,
                 sort='asc',
@@ -105,12 +130,20 @@ class VKClient:
             
         except vk_api.exceptions.ApiError as e:
             logger.error(f"VK API error getting comments: {e}")
+            error_code = getattr(e, 'code', None)
+            error_code_str = str(error_code) if error_code is not None else None
+            request_info = f"video.getComments(owner_id={owner_id}, video_id={video_id})"
+            if self.error_notifier:
+                await self.error_notifier("VK API", request_info, error_code_str, str(e))
             raise
         except Exception as e:
             logger.error(f"Error getting comments: {e}")
+            request_info = f"video.getComments(owner_id={owner_id}, video_id={video_id})"
+            if self.error_notifier:
+                await self.error_notifier("VK API", request_info, None, str(e))
             raise
     
-    def get_group_videos(self, group_id: str, count: int = 20) -> List[Dict]:
+    async def get_group_videos(self, group_id: str, count: int = 20) -> List[Dict]:
         """
         Get videos from a VK group using multiple methods.
         
@@ -135,7 +168,9 @@ class VKClient:
             
             # Method 1: Get videos from video.get() (videos uploaded to group's video section)
             try:
-                videos = self.vk_api.video.get(
+                # Run blocking vk_api call in thread pool to avoid blocking event loop
+                videos = await _run_in_thread(
+                    self.vk_api.video.get,
                     owner_id=owner_id,  # Negative integer for groups
                     count=count,
                     sort=2  # Sort by date (newest first)
@@ -150,7 +185,9 @@ class VKClient:
             
             # Method 2: Get videos from wall posts (live streams are often posted on wall)
             try:
-                wall_posts = self.vk_api.wall.get(
+                # Run blocking vk_api call in thread pool to avoid blocking event loop
+                wall_posts = await _run_in_thread(
+                    self.vk_api.wall.get,
                     owner_id=owner_id,
                     count=min(count * 2, 100),  # Get more posts to find videos
                     filter='all'  # Get all posts, not just owner's
@@ -190,9 +227,17 @@ class VKClient:
             
         except vk_api.exceptions.ApiError as e:
             logger.error(f"VK API error getting group videos: {e}")
+            error_code = getattr(e, 'code', None)
+            error_code_str = str(error_code) if error_code is not None else None
+            request_info = f"video.get/wall.get(group_id={group_id})"
+            if self.error_notifier:
+                await self.error_notifier("VK API", request_info, error_code_str, str(e))
             raise
         except Exception as e:
             logger.error(f"Error getting group videos: {e}")
+            request_info = f"video.get/wall.get(group_id={group_id})"
+            if self.error_notifier:
+                await self.error_notifier("VK API", request_info, None, str(e))
             raise
     
     def is_live_stream(self, video: Dict) -> bool:
