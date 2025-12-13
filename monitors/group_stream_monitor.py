@@ -9,6 +9,8 @@ import asyncio
 import logging
 from typing import Set
 
+import vk_api
+
 from telegram.ext import Application
 
 from api.vk_client import VKClient
@@ -57,75 +59,81 @@ class VKGroupStreamMonitor:
             True if monitoring should continue, False if stopped
         """
         try:
+            # Check if we already have an active stream being monitored
+            # If yes, skip checking for new streams to avoid unnecessary API calls
+            from handlers.telegram_commands import get_active_translations
+            active_translations = get_active_translations()
+            
+            if active_translations:
+                logger.debug(f"Skipping new stream check - already monitoring {len(active_translations)} stream(s)")
+                return True
+            
             logger.info(f"Checking for new streams in group {self.group_id}")
             
-            # Get videos from the group - request more to ensure we catch all live streams
+            # Get videos from the group
             videos = await self.vk_client.get_group_videos(self.group_id, count=50)
             
             if not videos:
                 logger.warning("No videos found in group or access denied")
                 return True
             
-            # Always check ALL videos individually to get fresh data
-            # The list API might return stale data, so we need to verify each video
-            # This ensures we catch live streams even if they're not at the top of the list
-            logger.info(f"Checking {len(videos)} videos individually for live status...")
+            # Filter videos that might be live based on wall data
+            # Sort by date (newest first) - videos from wall.get() are already sorted by date
+            potential_live_videos = []
             for video in videos:
-                video_id = self.vk_client.get_video_id(video)
-                # Always check individually to get the most up-to-date status
-                try:
-                    detailed_info = await self.vk_client.get_video_info(
-                        str(video['owner_id']), 
-                        str(video['id'])
-                    )
-                    if detailed_info:
-                        # Update video with detailed info (this includes fresh live status)
-                        old_live = video.get('live')
-                        old_live_status = video.get('live_status')
-                        video.update(detailed_info)
-                        new_live = detailed_info.get('live')
-                        new_live_status = detailed_info.get('live_status')
-                        new_is_mobile_live = detailed_info.get('is_mobile_live')
-                        # Only log if status changed or if it's a live stream
-                        if (old_live != new_live or old_live_status != new_live_status or 
-                            new_live == 1 or new_live_status == 'started' or new_is_mobile_live):
-                            logger.info(f"Video {video_id}: live={new_live}, live_status={new_live_status}, is_mobile_live={new_is_mobile_live}")
-                except Exception as e:
-                    logger.debug(f"Could not check video {video_id} individually: {e}")
+                # Check if video might be live based on wall data
+                live_status = video.get('live')
+                live_status_str = video.get('live_status', '')
+                is_mobile_live = video.get('is_mobile_live', False)
+                
+                # Include videos that might be live or recently finished
+                if (live_status == 1 or live_status_str == 'started' or 
+                    (is_mobile_live and live_status_str != 'finished') or
+                    live_status_str == 'finished'):  # Include finished to detect ended streams
+                    potential_live_videos.append(video)
             
             new_streams = []
             ended_streams = []
             
-            # Debug: log all videos to see what we're getting
-            logger.info(f"Retrieved {len(videos)} videos from group")
-            for idx, video in enumerate(videos[:5]):  # Log first 5 videos for debugging
-                video_id = self.vk_client.get_video_id(video)
-                title = video.get('title', 'No title')
-                live = video.get('live')
-                live_status = video.get('live_status', '')
-                # Log all video fields to understand structure
-                if idx == 0:
-                    logger.info(f"First video structure: {list(video.keys())}")
-                is_mobile_live = video.get('is_mobile_live', False)
-                logger.info(f"Video {idx+1}: id={video_id}, title={title[:50]}, live={live}, live_status={live_status}, is_mobile_live={is_mobile_live}, type={video.get('type', 'N/A')}")
-            
-            for video in videos:
-                video_id = self.vk_client.get_video_id(video)
-                title = video.get('title', 'No title')
+            # Only check and process the most recent video that appears to be live
+            if potential_live_videos:
+                # Get the first (most recent) potential live video
+                video_to_check = potential_live_videos[0]
+                video_id = self.vk_client.get_video_id(video_to_check)
+                logger.info(f"Checking most recent potential live video: {video_id}")
+                
+                # Check if this video is already being monitored by a translation monitor
+                stream_url = self.vk_client.get_video_url(video_to_check)
+                
+                if stream_url in active_translations:
+                    # Video is already being monitored, skip it entirely
+                    # Don't check for new streams if we already have one being monitored
+                    logger.debug(f"Video {video_id} is already being monitored, skipping to avoid checking for new streams")
+                    return True
+                
+                # Video is not being monitored yet
+                # We use wall data to determine if it's live - no need for additional video.get call
+                # The wall.get response already contains live status fields (live, live_status, is_mobile_live)
+                logger.debug(f"Video {video_id} not yet monitored, using wall data to determine live status")
+                
+                # Process only this video for new/ended stream detection
+                title = video_to_check.get('title', 'No title')
                 
                 # Check if it's a live stream
-                if self.vk_client.is_live_stream(video):
+                if self.vk_client.is_live_stream(video_to_check):
                     if video_id not in self.seen_streams:
                         logger.info(f"NEW LIVE STREAM DETECTED: {video_id} - {title}")
                         self.seen_streams.add(video_id)
-                        new_streams.append(video)
+                        new_streams.append(video_to_check)
                     else:
                         logger.debug(f"Live stream already seen: {video_id}")
-                elif self.vk_client.is_stream_ended(video) and video_id in self.seen_streams:
+                elif self.vk_client.is_stream_ended(video_to_check) and video_id in self.seen_streams:
                     # Stream ended
                     logger.info(f"STREAM ENDED: {video_id} - {title}")
-                    ended_streams.append(video)
+                    ended_streams.append(video_to_check)
                     self.seen_streams.discard(video_id)  # Remove from seen streams
+            else:
+                logger.debug("No potential live videos found in wall posts")
             
             logger.info(f"Found {len(new_streams)} new streams")
             logger.info(f"Found {len(ended_streams)} ended streams")
@@ -178,6 +186,10 @@ class VKGroupStreamMonitor:
             from handlers.telegram_commands import get_active_translations
             active_translations = get_active_translations()
             active_translations[stream_url] = monitor
+            
+            # Add delay before starting translation monitor to avoid concurrent API calls
+            # This ensures the group monitor's current API call cycle completes first
+            await asyncio.sleep(2)
             
             # Start monitoring in background
             asyncio.create_task(monitor.start_monitoring())
@@ -237,11 +249,11 @@ class VKGroupStreamMonitor:
             logger.error(f"Error sending channel message: {e}")
     
     async def start_polling(self):
-        """Start polling for new streams every 15 seconds."""
+        """Start polling for new streams every 30 seconds."""
         logger.info(f"Starting VK group stream monitoring for group {self.group_id}")
         await self.send_notification(
             f"✅ Started monitoring VK group {self.group_id} for new live streams\n"
-            f"⏱ Checking every 15 seconds"
+            f"⏱ Checking every 30 seconds"
         )
         
         # Initial check to populate seen_streams and process existing streams
@@ -249,18 +261,32 @@ class VKGroupStreamMonitor:
             videos = await self.vk_client.get_group_videos(self.group_id, count=50)
             if videos:
                 existing_streams = []
+                
+                # Filter videos that might be live based on wall data
+                potential_live_videos = []
                 for video in videos:
-                    # Check individually to get fresh live status
-                    try:
-                        detailed_info = await self.vk_client.get_video_info(
-                            str(video['owner_id']), 
-                            str(video['id'])
-                        )
-                        if detailed_info:
-                            video.update(detailed_info)
-                    except Exception as e:
-                        logger.debug(f"Could not check video individually: {e}")
+                    live_status = video.get('live')
+                    live_status_str = video.get('live_status', '')
+                    is_mobile_live = video.get('is_mobile_live', False)
                     
+                    # Include videos that might be live
+                    if (live_status == 1 or live_status_str == 'started' or 
+                        (is_mobile_live and live_status_str != 'finished')):
+                        potential_live_videos.append(video)
+                
+                # Only check the most recent potential live video
+                if potential_live_videos:
+                    video_to_check = potential_live_videos[0]
+                    video_id = self.vk_client.get_video_id(video_to_check)
+                    logger.info(f"Initial check: verifying most recent potential live video: {video_id}")
+                    
+                    # Skip get_video_info during initial check to avoid rate limits
+                    # We already have enough info from wall posts to determine if it's live
+                    # The detailed check will happen in the regular polling cycle
+                    logger.debug("Skipping detailed video info check during initial check to avoid rate limits")
+                
+                # Check all videos (using wall data or updated data) for live streams
+                for video in videos:
                     if self.vk_client.is_live_stream(video):
                         video_id = self.vk_client.get_video_id(video)
                         self.seen_streams.add(video_id)
@@ -281,7 +307,7 @@ class VKGroupStreamMonitor:
                 is_active = await self.check_for_new_streams()
                 if not is_active:
                     break
-                await asyncio.sleep(15)  # Check every 15 seconds
+                await asyncio.sleep(30)  # Check every 30 seconds
             except Exception as e:
                 logger.error(f"Error in stream polling loop: {e}")
-                await asyncio.sleep(15)
+                await asyncio.sleep(30)

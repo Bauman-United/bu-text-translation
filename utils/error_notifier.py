@@ -32,7 +32,7 @@ async def send_error_notification(
         error_message: Error message
     """
     if not app or not user_id:
-        logger.warning("Cannot send error notification: app or user_id not provided")
+        logger.warning(f"Cannot send error notification: app={app is not None}, user_id={user_id}")
         return
     
     try:
@@ -52,7 +52,10 @@ async def send_error_notification(
             text=message,
             parse_mode='HTML'
         )
-        logger.info(f"Error notification sent to user {user_id} for {service_name}")
+        
+        logger.info(f"Error notification sent to user {user_id} for {service_name}: {error_message[:50]}...")
     except Exception as e:
-        logger.error(f"Failed to send error notification: {e}")
+        logger.error(f"Failed to send error notification to user {user_id}: {e}", exc_info=True)
+        # Don't re-raise - we don't want error notification failures to break the main flow
+
 

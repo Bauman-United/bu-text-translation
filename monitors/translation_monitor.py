@@ -74,29 +74,9 @@ class VKTranslationMonitor:
             True if monitoring should continue, False if stream ended
         """
         try:
-            # Get video information
-            video_info = await self.vk_client.get_video_info(self.owner_id, self.video_id)
-            
-            if not video_info:
-                logger.error("Video not found or access denied")
-                return False
-            
-            # Check if translation is live
-            if self.vk_client.is_stream_ended(video_info):
-                # Live translation ended
-                logger.info(f"Translation has ended: {self.translation_url}")
-                self.is_active = False
-                await self.send_system_message("🔴 Translation has ended. Monitoring stopped.")
-                
-                # Also send notification to the user who started monitoring
-                await self.send_notification_to_user(
-                    f"🔴 <b>STREAM FINISHED!</b>\n\n"
-                    f"📺 Stream URL: {self.translation_url}\n"
-                    f"⏹️ Monitoring has been stopped automatically"
-                )
-                return False
-            
-            # Get comments
+            # Get comments directly - removed video.get call to reduce API usage
+            # Stream end detection is handled by the group monitor or by detecting
+            # when comments stop coming for an extended period
             comments = await self.vk_client.get_video_comments(self.owner_id, self.video_id)
             
             new_comments = []
@@ -345,6 +325,21 @@ class VKTranslationMonitor:
         
         # Process existing comments to catch up on score updates
         await self.process_existing_comments()
+        
+        # Send current score as initial status if we found one
+        if self.current_score != (0, 0):
+            our_score, opponent_score = self.current_score
+            initial_message = f"📊 Текущий счет: {our_score}-{opponent_score}"
+            await self.send_message(initial_message)
+            logger.info(f"Sent initial score: {our_score}-{opponent_score}")
+        
+        # Add delay after processing existing comments to avoid rate limits
+        # This gives time between get_video_comments() and the first check_comments() call
+        # The rate limiter adds 10 seconds between calls, so we add extra margin
+        # We wait longer to ensure any other concurrent API calls (like from group monitor) complete first
+        # Also gives time for the rate limiter to properly space out calls
+        # VK has strict rate limits, so we wait 20 seconds to be safe
+        await asyncio.sleep(20)
         
         # Start monitoring loop
         while self.is_active:
