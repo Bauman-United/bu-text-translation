@@ -7,7 +7,7 @@ for new live streams and automatically starts monitoring them.
 
 import asyncio
 import logging
-from typing import Set
+from typing import Set, Optional
 
 import vk_api
 
@@ -39,7 +39,10 @@ class VKGroupStreamMonitor:
         self.channel_id = channel_id
         self.app = app
         self.user_id = user_id
+        # Track streams we've already started monitoring (by video id "owner_id_id")
         self.seen_streams: Set[str] = set()
+        # Track last seen wall post id to only process new posts
+        self.last_wall_post_id: Optional[int] = None
         self.is_active = True
         
         # Initialize VK client with access token
@@ -53,7 +56,7 @@ class VKGroupStreamMonitor:
     
     async def check_for_new_streams(self) -> bool:
         """
-        Check for new live streams in the VK group.
+        Check for new wall posts in the VK group and start monitoring any live stream videos found.
         
         Returns:
             True if monitoring should continue, False if stopped
@@ -68,84 +71,137 @@ class VKGroupStreamMonitor:
                 logger.debug(f"Skipping new stream check - already monitoring {len(active_translations)} stream(s)")
                 return True
             
-            logger.info(f"Checking for new streams in group {self.group_id}")
+            logger.info(f"Checking for new wall posts in group {self.group_id}")
             
-            # Get videos from the group
-            videos = await self.vk_client.get_group_videos(self.group_id, count=50)
+            posts = await self.vk_client.get_group_wall_posts(self.group_id, count=30)
+            if not posts:
+                logger.debug("No wall posts returned")
+                return True
+
+            # Debug: show what we got from VK (ids + attachment types for newest few)
+            try:
+                newest_preview = posts[:5]
+                logger.info(
+                    "VK wall.get preview (newest first): "
+                    + ", ".join(
+                        f"id={p.get('id')} att={[a.get('type') for a in (p.get('attachments') or [])]}"
+                        f"{' copy_history=' + str(len(p.get('copy_history') or [])) if (p.get('copy_history') or []) else ''}"
+                        for p in newest_preview
+                    )
+                )
+            except Exception:
+                # Never fail monitoring due to debug logging
+                pass
             
-            if not videos:
-                logger.warning("No videos found in group or access denied")
+            # wall.get returns newest first; we want to process only posts newer than last_wall_post_id
+            if self.last_wall_post_id is None:
+                # First run: initialize watermark to current newest post id, don't back-process history
+                newest_id = max((p.get('id') or 0) for p in posts)
+                self.last_wall_post_id = int(newest_id) if newest_id else 0
+                logger.info(f"Initialized wall post watermark: {self.last_wall_post_id} (newest wall post id)")
+
+                # IMPORTANT: Also process the latest wall post once.
+                # This satisfies "catch last post" behavior without scanning old history.
+                newest_posts = [p for p in posts if (p.get('id') or 0) == int(self.last_wall_post_id)]
+                if not newest_posts and posts:
+                    newest_posts = [posts[0]]
+                
+                started = 0
+                for post in newest_posts:
+                    post_id = post.get('id')
+                    videos = self.vk_client.extract_videos_from_wall_post(post)
+                    if not videos:
+                        att_types = [a.get('type') for a in (post.get('attachments') or [])]
+                        ch_len = len(post.get('copy_history') or [])
+                        logger.info(
+                            f"Init wall post {post_id}: no video attachments found "
+                            f"(attachments={att_types}, copy_history={ch_len})"
+                        )
+                        continue
+                    
+                    for video in videos:
+                        logger.info(
+                            f"Init wall post {post_id}: found video owner_id={video.get('owner_id')} id={video.get('id')} "
+                            f"live={video.get('live')} live_status={video.get('live_status')} is_mobile_live={video.get('is_mobile_live')} "
+                            f"type={video.get('type')}"
+                        )
+                        if not self.vk_client.is_live_stream(video):
+                            continue
+                        
+                        video_id = self.vk_client.get_video_id(video)
+                        title = video.get('title', 'Live Stream')
+                        stream_url = self.vk_client.get_video_url(video)
+                        
+                        if stream_url in active_translations:
+                            logger.debug(f"Live stream already being monitored (init from wall post {post_id}): {video_id}")
+                            continue
+                        if video_id in self.seen_streams:
+                            logger.debug(f"Live stream already seen (init from wall post {post_id}): {video_id}")
+                            continue
+                        
+                        logger.info(f"NEW LIVE STREAM FROM LAST WALL POST {post_id}: {video_id} - {title}")
+                        self.seen_streams.add(video_id)
+                        await self.handle_new_stream(video)
+                        started += 1
+                
+                logger.info(f"Init processing complete. Started {started} live stream monitor(s) from last wall post.")
                 return True
             
-            # Filter videos that might be live based on wall data
-            # Sort by date (newest first) - videos from wall.get() are already sorted by date
-            potential_live_videos = []
-            for video in videos:
-                # Check if video might be live based on wall data
-                live_status = video.get('live')
-                live_status_str = video.get('live_status', '')
-                is_mobile_live = video.get('is_mobile_live', False)
-                
-                # Include videos that might be live or recently finished
-                if (live_status == 1 or live_status_str == 'started' or 
-                    (is_mobile_live and live_status_str != 'finished') or
-                    live_status_str == 'finished'):  # Include finished to detect ended streams
-                    potential_live_videos.append(video)
+            new_posts = [p for p in posts if (p.get('id') or 0) > int(self.last_wall_post_id)]
+            if not new_posts:
+                logger.debug(f"No new wall posts since last check (watermark={self.last_wall_post_id})")
+                return True
             
-            new_streams = []
-            ended_streams = []
+            # Process oldest -> newest to preserve order
+            new_posts.sort(key=lambda p: p.get('id') or 0)
+            logger.info(
+                f"New wall posts detected: ids={[p.get('id') for p in new_posts]} (watermark={self.last_wall_post_id})"
+            )
             
-            # Only check and process the most recent video that appears to be live
-            if potential_live_videos:
-                # Get the first (most recent) potential live video
-                video_to_check = potential_live_videos[0]
-                video_id = self.vk_client.get_video_id(video_to_check)
-                logger.info(f"Checking most recent potential live video: {video_id}")
+            started = 0
+            for post in new_posts:
+                post_id = post.get('id')
+                videos = self.vk_client.extract_videos_from_wall_post(post)
+                if not videos:
+                    # Log attachment types to understand why we didn't see videos
+                    att_types = [a.get('type') for a in (post.get('attachments') or [])]
+                    ch_len = len(post.get('copy_history') or [])
+                    logger.info(f"Wall post {post_id}: no video attachments found (attachments={att_types}, copy_history={ch_len})")
+                    continue
                 
-                # Check if this video is already being monitored by a translation monitor
-                stream_url = self.vk_client.get_video_url(video_to_check)
-                
-                if stream_url in active_translations:
-                    # Video is already being monitored, skip it entirely
-                    # Don't check for new streams if we already have one being monitored
-                    logger.debug(f"Video {video_id} is already being monitored, skipping to avoid checking for new streams")
-                    return True
-                
-                # Video is not being monitored yet
-                # We use wall data to determine if it's live - no need for additional video.get call
-                # The wall.get response already contains live status fields (live, live_status, is_mobile_live)
-                logger.debug(f"Video {video_id} not yet monitored, using wall data to determine live status")
-                
-                # Process only this video for new/ended stream detection
-                title = video_to_check.get('title', 'No title')
-                
-                # Check if it's a live stream
-                if self.vk_client.is_live_stream(video_to_check):
-                    if video_id not in self.seen_streams:
-                        logger.info(f"NEW LIVE STREAM DETECTED: {video_id} - {title}")
-                        self.seen_streams.add(video_id)
-                        new_streams.append(video_to_check)
-                    else:
-                        logger.debug(f"Live stream already seen: {video_id}")
-                elif self.vk_client.is_stream_ended(video_to_check) and video_id in self.seen_streams:
-                    # Stream ended
-                    logger.info(f"STREAM ENDED: {video_id} - {title}")
-                    ended_streams.append(video_to_check)
-                    self.seen_streams.discard(video_id)  # Remove from seen streams
-            else:
-                logger.debug("No potential live videos found in wall posts")
+                for video in videos:
+                    logger.info(
+                        f"Wall post {post_id}: found video owner_id={video.get('owner_id')} id={video.get('id')} "
+                        f"live={video.get('live')} live_status={video.get('live_status')} is_mobile_live={video.get('is_mobile_live')} "
+                        f"type={video.get('type')}"
+                    )
+                    if not self.vk_client.is_live_stream(video):
+                        continue
+                    
+                    video_id = self.vk_client.get_video_id(video)
+                    title = video.get('title', 'Live Stream')
+                    stream_url = self.vk_client.get_video_url(video)
+                    
+                    if stream_url in active_translations:
+                        logger.debug(f"Live stream already being monitored (from wall post {post_id}): {video_id}")
+                        continue
+                    if video_id in self.seen_streams:
+                        logger.debug(f"Live stream already seen (from wall post {post_id}): {video_id}")
+                        continue
+                    
+                    logger.info(f"NEW LIVE STREAM FROM WALL POST {post_id}: {video_id} - {title}")
+                    self.seen_streams.add(video_id)
+                    await self.handle_new_stream(video)
+                    started += 1
             
-            logger.info(f"Found {len(new_streams)} new streams")
-            logger.info(f"Found {len(ended_streams)} ended streams")
-            logger.info(f"Total seen streams: {len(self.seen_streams)}")
+            # Advance watermark
+            newest_processed = max((p.get('id') or 0) for p in new_posts)
+            self.last_wall_post_id = max(int(self.last_wall_post_id), int(newest_processed or 0))
             
-            # Process new streams
-            for stream in new_streams:
-                await self.handle_new_stream(stream)
-            
-            # Process ended streams
-            for stream in ended_streams:
-                await self.handle_ended_stream(stream)
+            logger.info(
+                f"Processed {len(new_posts)} new wall post(s), started {started} live stream monitor(s). "
+                f"Watermark now {self.last_wall_post_id}"
+            )
             
             return True
             
@@ -197,35 +253,6 @@ class VKGroupStreamMonitor:
         except Exception as e:
             logger.error(f"Error handling new stream: {e}")
     
-    async def handle_ended_stream(self, stream: dict):
-        """Handle an ended live stream."""
-        try:
-            stream_url = self.vk_client.get_video_url(stream)
-            stream_title = stream.get('title', 'Live Stream')
-            
-            logger.info(f"Live stream ended: {stream_url}")
-            
-            # Send notification to user
-            await self.send_notification(
-                f"🔴 <b>STREAM FINISHED!</b>\n\n"
-                f"📺 Title: {stream_title}\n"
-                f"🔗 URL: {stream_url}\n\n"
-                f"⏹️ Stream has ended and monitoring has been stopped"
-            )
-            
-            # Stop monitoring this stream if it's in active_translations
-            from handlers.telegram_commands import get_active_translations
-            active_translations = get_active_translations()
-            
-            if stream_url in active_translations:
-                monitor = active_translations[stream_url]
-                monitor.is_active = False
-                del active_translations[stream_url]
-                logger.info(f"Stopped monitoring ended stream: {stream_url}")
-            
-        except Exception as e:
-            logger.error(f"Error handling ended stream: {e}")
-    
     async def send_notification(self, text: str):
         """Send notification directly to the user."""
         try:
@@ -255,51 +282,11 @@ class VKGroupStreamMonitor:
             f"✅ Started monitoring VK group {self.group_id} for new live streams\n"
             f"⏱ Checking every 30 seconds"
         )
-        
-        # Initial check to populate seen_streams and process existing streams
+        # Initialize watermark on first check (no back-processing history)
         try:
-            videos = await self.vk_client.get_group_videos(self.group_id, count=50)
-            if videos:
-                existing_streams = []
-                
-                # Filter videos that might be live based on wall data
-                potential_live_videos = []
-                for video in videos:
-                    live_status = video.get('live')
-                    live_status_str = video.get('live_status', '')
-                    is_mobile_live = video.get('is_mobile_live', False)
-                    
-                    # Include videos that might be live
-                    if (live_status == 1 or live_status_str == 'started' or 
-                        (is_mobile_live and live_status_str != 'finished')):
-                        potential_live_videos.append(video)
-                
-                # Only check the most recent potential live video
-                if potential_live_videos:
-                    video_to_check = potential_live_videos[0]
-                    video_id = self.vk_client.get_video_id(video_to_check)
-                    logger.info(f"Initial check: verifying most recent potential live video: {video_id}")
-                    
-                    # Skip get_video_info during initial check to avoid rate limits
-                    # We already have enough info from wall posts to determine if it's live
-                    # The detailed check will happen in the regular polling cycle
-                    logger.debug("Skipping detailed video info check during initial check to avoid rate limits")
-                
-                # Check all videos (using wall data or updated data) for live streams
-                for video in videos:
-                    if self.vk_client.is_live_stream(video):
-                        video_id = self.vk_client.get_video_id(video)
-                        self.seen_streams.add(video_id)
-                        existing_streams.append(video)
-                
-                logger.info(f"Found {len(existing_streams)} existing live streams")
-                
-                # Process existing streams - start monitoring them and process their comments
-                for stream in existing_streams:
-                    await self.handle_new_stream(stream)
-                    
+            await self.check_for_new_streams()
         except Exception as e:
-            logger.error(f"Error during initial stream check: {e}")
+            logger.error(f"Error during initial wall watermark setup: {e}")
         
         # Start polling loop
         while self.is_active:

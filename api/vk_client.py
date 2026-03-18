@@ -443,6 +443,95 @@ class VKClient:
                 await self.error_notifier("VK API", request_info, None, str(e))
             raise
     
+    async def get_group_wall_posts(self, group_id: str, count: int = 20) -> List[Dict]:
+        """
+        Get recent wall posts for a VK group.
+        
+        Args:
+            group_id: VK group ID
+            count: Number of posts to retrieve
+        
+        Returns:
+            List of wall post dictionaries (newest first)
+        """
+        try:
+            if not self.access_token or not self.access_token.strip():
+                logger.error("VK_ACCESS_TOKEN required for wall operations")
+                raise ValueError("VK_ACCESS_TOKEN is required for wall operations")
+            
+            owner_id = -int(group_id)
+            request_info = f"wall.get(owner_id={owner_id}, count={min(count, 100)}, filter=all)"
+            logger.info(f"Making VK API request: {request_info}")
+            
+            await self.rate_limiter.wait_if_needed()
+            try:
+                wall_posts = await _run_in_thread(
+                    self.vk_api.wall.get,
+                    owner_id=owner_id,
+                    count=min(count, 100),
+                    filter='all'
+                )
+            finally:
+                await self.rate_limiter.mark_call_complete()
+            
+            items = (wall_posts or {}).get('items') or []
+            if not items:
+                logger.debug("wall.get returned no items")
+                return []
+            
+            return items
+        
+        except vk_api.exceptions.ApiError as e:
+            error_code = getattr(e, 'code', None)
+            error_code_str = str(error_code) if error_code is not None else None
+            request_info = f"wall.get(group_id={group_id})"
+            
+            if error_code == 29:
+                logger.warning(f"VK API rate limit error getting wall posts: {e}")
+            else:
+                logger.error(f"VK API error getting wall posts: {e}")
+            
+            if self.error_notifier:
+                await self.error_notifier("VK API", request_info, error_code_str, str(e))
+            raise
+        except Exception as e:
+            logger.error(f"Error getting wall posts: {e}")
+            request_info = f"wall.get(group_id={group_id})"
+            if self.error_notifier:
+                await self.error_notifier("VK API", request_info, None, str(e))
+            raise
+    
+    def extract_videos_from_wall_post(self, post: Dict) -> List[Dict]:
+        """
+        Extract attached videos from a wall post.
+        
+        Note: video objects from wall attachments typically already include live fields
+        (e.g., live/live_status/is_mobile_live) when applicable.
+        """
+        videos: List[Dict] = []
+        
+        def _extract_from_attachments(attachments: List[Dict]):
+            for attachment in attachments or []:
+                atype = attachment.get('type')
+                if atype == 'video':
+                    video_data = attachment.get('video') or {}
+                    if video_data:
+                        videos.append(video_data)
+                elif atype == 'link':
+                    # Sometimes a wall post contains a link to a video/live, not a direct video attachment.
+                    # We'll log these at the monitor layer; parsing the link into a video object requires
+                    # additional API calls (video.get) which we intentionally avoid here.
+                    continue
+        
+        # Direct attachments on the post
+        _extract_from_attachments((post or {}).get('attachments') or [])
+        
+        # Reposts: attachments can be inside copy_history (list of nested post objects)
+        for parent in (post or {}).get('copy_history') or []:
+            _extract_from_attachments((parent or {}).get('attachments') or [])
+        
+        return videos
+    
     def is_live_stream(self, video: Dict) -> bool:
         """
         Check if a video is a live stream.
