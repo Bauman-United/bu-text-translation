@@ -8,7 +8,7 @@ the monitoring services.
 import asyncio
 import logging
 from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
 from config.settings import Config
 from handlers.telegram_commands import (
@@ -18,6 +18,11 @@ from handlers.telegram_commands import (
     list_command,
     group_status_command,
     catch_existing_command,
+    set_game_command,
+    games_command,
+    set_game_day_callback,
+    delete_game_callback,
+    game_time_input_handler,
     remove_translation_callback,
     set_group_stream_monitor
 )
@@ -43,9 +48,18 @@ def main():
         application.add_handler(CommandHandler("list", list_command))
         application.add_handler(CommandHandler("group_status", group_status_command))
         application.add_handler(CommandHandler("catch_existing", catch_existing_command))
+        application.add_handler(CommandHandler("set_game", set_game_command))
+        application.add_handler(CommandHandler("games", games_command))
         
         # Add callback query handler for remove translation buttons
         application.add_handler(CallbackQueryHandler(remove_translation_callback, pattern="^remove:"))
+        application.add_handler(CallbackQueryHandler(set_game_day_callback, pattern="^set_game_day:"))
+        application.add_handler(CallbackQueryHandler(delete_game_callback, pattern="^del_game:"))
+
+        # Handle plain text time input after choosing weekday via /set_game
+        application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, game_time_input_handler)
+        )
         
         # Add error handler
         async def error_handler(update, context):
@@ -65,6 +79,8 @@ def main():
                 BotCommand("list", "List all active translations being monitored"),
                 BotCommand("group_status", "Check VK group monitoring status"),
                 BotCommand("catch_existing", "Start monitoring any currently live streams"),
+                BotCommand("set_game", "Schedule a game time (VK monitoring window)"),
+                BotCommand("games", "List scheduled games and delete them"),
             ]
             try:
                 await application.bot.set_my_commands(commands)

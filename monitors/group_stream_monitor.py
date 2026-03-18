@@ -7,6 +7,7 @@ for new live streams and automatically starts monitoring them.
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Set, Optional
 
 import vk_api
@@ -18,6 +19,7 @@ from utils.url_parser import extract_group_id
 from monitors.translation_monitor import VKTranslationMonitor
 from config.settings import Config
 from utils.error_notifier import send_error_notification
+from utils.game_schedule import is_time_in_any_window
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +64,26 @@ class VKGroupStreamMonitor:
             True if monitoring should continue, False if stopped
         """
         try:
-            # Check if we already have an active stream being monitored
-            # If yes, skip checking for new streams to avoid unnecessary API calls
+            now = datetime.now()
+
+            # Stop comment monitoring when we are outside all scheduled windows.
             from handlers.telegram_commands import get_active_translations
             active_translations = get_active_translations()
+
+            if not is_time_in_any_window(now):
+                if active_translations:
+                    for monitor in list(active_translations.values()):
+                        monitor.is_active = False
+                    active_translations.clear()
+                    logger.info("Outside scheduled monitoring windows: stopped all active stream monitors")
+                return True
             
+            # We are inside at least one scheduled window.
+            # If we already have an active stream being monitored, skip VK discovery to avoid extra VK calls.
             if active_translations:
-                logger.debug(f"Skipping new stream check - already monitoring {len(active_translations)} stream(s)")
+                logger.debug(
+                    f"Skipping new stream check - already monitoring {len(active_translations)} stream(s)"
+                )
                 return True
             
             logger.info(f"Checking for new wall posts in group {self.group_id}")
@@ -109,6 +124,13 @@ class VKGroupStreamMonitor:
                 started = 0
                 for post in newest_posts:
                     post_id = post.get('id')
+                    post_dt = None
+                    if post.get('date') is not None:
+                        try:
+                            post_dt = datetime.fromtimestamp(int(post.get('date')))
+                        except Exception:
+                            post_dt = None
+
                     videos = self.vk_client.extract_videos_from_wall_post(post)
                     if not videos:
                         att_types = [a.get('type') for a in (post.get('attachments') or [])]
@@ -131,6 +153,14 @@ class VKGroupStreamMonitor:
                         video_id = self.vk_client.get_video_id(video)
                         title = video.get('title', 'Live Stream')
                         stream_url = self.vk_client.get_video_url(video)
+
+                        # Safety: only start monitoring if this wall post is within any window.
+                        if post_dt is not None and not is_time_in_any_window(post_dt):
+                            logger.info(
+                                f"Skipping stream from wall post {post_id} because post_dt is outside windows "
+                                f"(post_dt={post_dt.isoformat()})"
+                            )
+                            continue
                         
                         if stream_url in active_translations:
                             logger.debug(f"Live stream already being monitored (init from wall post {post_id}): {video_id}")
@@ -161,6 +191,13 @@ class VKGroupStreamMonitor:
             started = 0
             for post in new_posts:
                 post_id = post.get('id')
+                post_dt = None
+                if post.get('date') is not None:
+                    try:
+                        post_dt = datetime.fromtimestamp(int(post.get('date')))
+                    except Exception:
+                        post_dt = None
+
                 videos = self.vk_client.extract_videos_from_wall_post(post)
                 if not videos:
                     # Log attachment types to understand why we didn't see videos
@@ -181,6 +218,14 @@ class VKGroupStreamMonitor:
                     video_id = self.vk_client.get_video_id(video)
                     title = video.get('title', 'Live Stream')
                     stream_url = self.vk_client.get_video_url(video)
+
+                    # Only start monitoring if wall post date is within any scheduled windows.
+                    if post_dt is not None and not is_time_in_any_window(post_dt):
+                        logger.info(
+                            f"Skipping stream from wall post {post_id} because post_dt is outside windows "
+                            f"(post_dt={post_dt.isoformat()})"
+                        )
+                        continue
                     
                     if stream_url in active_translations:
                         logger.debug(f"Live stream already being monitored (from wall post {post_id}): {video_id}")

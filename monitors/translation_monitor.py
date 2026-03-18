@@ -93,6 +93,18 @@ class VKTranslationMonitor:
             return True
             
         except Exception as e:
+            # VK: sometimes the stream video can't be accessed anymore / doesn't exist
+            # (e.g. "Access denied: video not found", code=15). In this case, keep polling
+            # would waste VK quota and spam notifications, so we stop monitoring.
+            error_code = getattr(e, "code", None)
+            error_text = str(e).lower()
+            if error_code == 15 or "video not found" in error_text or "access denied" in error_text:
+                logger.info(
+                    f"Stopping monitoring for {self.translation_url} due to terminal VK error: "
+                    f"code={error_code}, error={e}"
+                )
+                return False
+
             logger.error(f"Error checking comments: {e}")
             return True
     
@@ -353,3 +365,12 @@ class VKTranslationMonitor:
                 await asyncio.sleep(30)
         
         logger.info(f"Stopped monitoring {self.translation_url}")
+        # Cleanup: remove from active_translations so future discovery can start again.
+        try:
+            from handlers.telegram_commands import get_active_translations
+            active_translations = get_active_translations()
+            if self.translation_url in active_translations:
+                del active_translations[self.translation_url]
+        except Exception:
+            # Cleanup should never crash monitoring shutdown
+            logger.debug("Cleanup after stopping monitoring failed", exc_info=True)
