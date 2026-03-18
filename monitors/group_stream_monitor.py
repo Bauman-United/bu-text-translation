@@ -7,7 +7,7 @@ for new live streams and automatically starts monitoring them.
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Set, Optional
 
 import vk_api
@@ -64,7 +64,7 @@ class VKGroupStreamMonitor:
             True if monitoring should continue, False if stopped
         """
         try:
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
 
             # Stop comment monitoring when we are outside all scheduled windows.
             from handlers.telegram_commands import get_active_translations
@@ -127,7 +127,7 @@ class VKGroupStreamMonitor:
                     post_dt = None
                     if post.get('date') is not None:
                         try:
-                            post_dt = datetime.fromtimestamp(int(post.get('date')))
+                            post_dt = datetime.fromtimestamp(int(post.get('date')), tz=timezone.utc)
                         except Exception:
                             post_dt = None
 
@@ -194,7 +194,7 @@ class VKGroupStreamMonitor:
                 post_dt = None
                 if post.get('date') is not None:
                     try:
-                        post_dt = datetime.fromtimestamp(int(post.get('date')))
+                        post_dt = datetime.fromtimestamp(int(post.get('date')), tz=timezone.utc)
                     except Exception:
                         post_dt = None
 

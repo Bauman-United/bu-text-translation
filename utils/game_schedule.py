@@ -12,20 +12,35 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+SERBIA_TZ = ZoneInfo("Europe/Belgrade")
+UTC = timezone.utc
 
 
 @dataclass(frozen=True)
 class GameSchedule:
     id: str
-    game_datetime_iso: str
+    # Stored in UTC with offset, e.g. "2026-03-18T20:30:00+00:00"
+    game_datetime_utc_iso: str
+
+    @property
+    def game_datetime_utc(self) -> datetime:
+        dt = datetime.fromisoformat(self.game_datetime_utc_iso)
+        if dt.tzinfo is None:
+            # Backward-compat safety: assume stored value was UTC naive.
+            dt = dt.replace(tzinfo=UTC)
+        return dt
 
     @property
     def game_datetime(self) -> datetime:
-        # Stored as naive local time ISO string.
-        return datetime.fromisoformat(self.game_datetime_iso)
+        """
+        Serbian-local datetime for display.
+        """
+        return self.game_datetime_utc.astimezone(SERBIA_TZ)
 
 
 def _get_store_path() -> Path:
@@ -65,24 +80,50 @@ def list_game_schedules() -> List[GameSchedule]:
         if not isinstance(it, dict):
             continue
         schedule_id = it.get("id")
-        iso = it.get("game_datetime_iso")
-        if not schedule_id or not iso:
+        utc_iso = it.get("game_datetime_utc_iso")
+        # Backward-compat: older records used game_datetime_iso as Serbian-local naive.
+        legacy_iso = it.get("game_datetime_iso")
+        if not schedule_id:
             continue
-        schedules.append(GameSchedule(id=str(schedule_id), game_datetime_iso=str(iso)))
+
+        if utc_iso:
+            schedules.append(
+                GameSchedule(id=str(schedule_id), game_datetime_utc_iso=str(utc_iso))
+            )
+        elif legacy_iso:
+            # Interpret legacy time as Serbian local time (naive).
+            legacy_dt = datetime.fromisoformat(str(legacy_iso))
+            if legacy_dt.tzinfo is None:
+                legacy_dt = legacy_dt.replace(tzinfo=SERBIA_TZ)
+            legacy_utc = legacy_dt.astimezone(UTC)
+            schedules.append(
+                GameSchedule(id=str(schedule_id), game_datetime_utc_iso=legacy_utc.isoformat())
+            )
     # newest first (game datetime)
-    schedules.sort(key=lambda s: s.game_datetime, reverse=True)
+    schedules.sort(key=lambda s: s.game_datetime_utc, reverse=True)
     return schedules
 
 
 def add_game_schedule(game_datetime: datetime) -> GameSchedule:
+    """
+    Add a schedule.
+    
+    `game_datetime` is expected to be Serbian-local time (timezone-aware preferred).
+    We'll store it internally as UTC.
+    """
+    dt_local = game_datetime
+    if dt_local.tzinfo is None:
+        dt_local = dt_local.replace(tzinfo=SERBIA_TZ)
+    dt_utc = dt_local.astimezone(UTC)
+
     schedules = list_game_schedules()
     new_id = uuid.uuid4().hex
-    item = {"id": new_id, "game_datetime_iso": game_datetime.isoformat()}
+    item = {"id": new_id, "game_datetime_utc_iso": dt_utc.isoformat()}
     # Save append to raw store (keeps existing items)
     current_items = _load_raw()
     current_items.append(item)
     _save_raw(current_items)
-    return GameSchedule(id=new_id, game_datetime_iso=item["game_datetime_iso"])
+    return GameSchedule(id=new_id, game_datetime_utc_iso=item["game_datetime_utc_iso"])
 
 
 def delete_game_schedule(schedule_id: str) -> bool:
@@ -96,12 +137,14 @@ def delete_game_schedule(schedule_id: str) -> bool:
 
 def get_monitor_windows(now: datetime) -> List[Tuple[datetime, datetime]]:
     """
-    Return list of active windows that contain `now`.
+    Return list of active windows (UTC) that contain `now`.
+    
+    `now` should be timezone-aware in UTC.
     """
     active: List[Tuple[datetime, datetime]] = []
     for s in list_game_schedules():
-        start = s.game_datetime - timedelta(minutes=10)
-        end = s.game_datetime + timedelta(hours=2)
+        start = s.game_datetime_utc - timedelta(minutes=10)
+        end = s.game_datetime_utc + timedelta(hours=2)
         if start <= now <= end:
             active.append((start, end))
     # If overlaps, order doesn't really matter, but keep deterministic

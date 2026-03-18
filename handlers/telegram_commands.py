@@ -11,6 +11,7 @@ import logging
 import hashlib
 from datetime import datetime, time as dtime, timedelta
 from typing import Dict, Any, Optional
+from zoneinfo import ZoneInfo
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -34,6 +35,8 @@ group_stream_monitor: VKGroupStreamMonitor = None
 # User flow state:
 # - after selecting a weekday via buttons, we ask for time input
 GAME_DAY_PENDING_KEY = "pending_game_weekday"
+
+SERBIA_TZ = ZoneInfo("Europe/Belgrade")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -85,7 +88,7 @@ def _compute_next_weekday_datetime(now: datetime, weekday_index: int, at_time: d
         candidate_date = (now + timedelta(days=i)).date()
         if candidate_date.weekday() != weekday_index:
             continue
-        candidate_dt = datetime.combine(candidate_date, at_time)
+        candidate_dt = datetime.combine(candidate_date, at_time).replace(tzinfo=SERBIA_TZ)
         if candidate_dt >= now:
             return candidate_dt
     # Fallback (shouldn't happen): pick next week's weekday
@@ -93,7 +96,7 @@ def _compute_next_weekday_datetime(now: datetime, weekday_index: int, at_time: d
     # If weekday differs, advance until it matches (max 6 steps)
     while candidate_date.weekday() != weekday_index:
         candidate_date = candidate_date + timedelta(days=1)
-    return datetime.combine(candidate_date, at_time)
+    return datetime.combine(candidate_date, at_time).replace(tzinfo=SERBIA_TZ)
 
 
 async def set_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -158,7 +161,7 @@ async def game_time_input_handler(update: Update, context: ContextTypes.DEFAULT_
         context.user_data[GAME_DAY_PENDING_KEY] = weekday_index
         return
 
-    now = datetime.now()
+    now = datetime.now(SERBIA_TZ)
     game_dt = _compute_next_weekday_datetime(now, weekday_index, parsed_time)
     schedule = add_game_schedule(game_dt)
 
