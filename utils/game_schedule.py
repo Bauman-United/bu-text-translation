@@ -5,6 +5,9 @@ We store multiple datetimes (one per scheduled game) and define an active monito
 window for each:
   window_start = game_datetime - 10 minutes
   window_end   = game_datetime + 2 hours
+
+Each game has a parse_mode ("comments" for VK live comments, "site" for match page
+scraping) and optionally a match_url + seen_scores for the site mode.
 """
 
 from __future__ import annotations
@@ -24,27 +27,34 @@ UTC = timezone.utc
 @dataclass(frozen=True)
 class GameSchedule:
     id: str
-    # Stored in UTC with offset, e.g. "2026-03-18T20:30:00+00:00"
     game_datetime_utc_iso: str
+    parse_mode: str = "comments"  # "comments" | "site"
+    match_url: Optional[str] = None
+    seen_scores: tuple = ()  # score strings already posted (for site mode)
 
     @property
     def game_datetime_utc(self) -> datetime:
         dt = datetime.fromisoformat(self.game_datetime_utc_iso)
         if dt.tzinfo is None:
-            # Backward-compat safety: assume stored value was UTC naive.
             dt = dt.replace(tzinfo=UTC)
         return dt
 
     @property
     def game_datetime(self) -> datetime:
-        """
-        Serbian-local datetime for display.
-        """
         return self.game_datetime_utc.astimezone(SERBIA_TZ)
 
+    @property
+    def parse_mode_label(self) -> str:
+        if self.parse_mode == "site":
+            return "🌐 Сайт"
+        return "📺 VK комментарии"
+
+
+# ---------------------------------------------------------------------------
+# Storage helpers
+# ---------------------------------------------------------------------------
 
 def _get_store_path() -> Path:
-    # .../bu-text-translation/utils/game_schedule.py -> repo root is one level up
     repo_root = Path(__file__).resolve().parents[1]
     data_dir = repo_root / "data"
     return data_dir / "game_schedules.json"
@@ -73,41 +83,63 @@ def _save_raw(items: List[dict]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
+def _item_to_schedule(it: dict) -> Optional[GameSchedule]:
+    """Convert a raw JSON dict into a GameSchedule (or None)."""
+    if not isinstance(it, dict):
+        return None
+    schedule_id = it.get("id")
+    utc_iso = it.get("game_datetime_utc_iso")
+    legacy_iso = it.get("game_datetime_iso")
+    if not schedule_id:
+        return None
+
+    resolved_utc_iso: Optional[str] = None
+    if utc_iso:
+        resolved_utc_iso = str(utc_iso)
+    elif legacy_iso:
+        legacy_dt = datetime.fromisoformat(str(legacy_iso))
+        if legacy_dt.tzinfo is None:
+            legacy_dt = legacy_dt.replace(tzinfo=SERBIA_TZ)
+        resolved_utc_iso = legacy_dt.astimezone(UTC).isoformat()
+
+    if not resolved_utc_iso:
+        return None
+
+    return GameSchedule(
+        id=str(schedule_id),
+        game_datetime_utc_iso=resolved_utc_iso,
+        parse_mode=str(it.get("parse_mode", "comments")),
+        match_url=it.get("match_url"),
+        seen_scores=tuple(it.get("seen_scores", [])),
+    )
+
+
+# ---------------------------------------------------------------------------
+# CRUD
+# ---------------------------------------------------------------------------
+
 def list_game_schedules() -> List[GameSchedule]:
     items = _load_raw()
     schedules: List[GameSchedule] = []
     for it in items:
-        if not isinstance(it, dict):
-            continue
-        schedule_id = it.get("id")
-        utc_iso = it.get("game_datetime_utc_iso")
-        # Backward-compat: older records used game_datetime_iso as Serbian-local naive.
-        legacy_iso = it.get("game_datetime_iso")
-        if not schedule_id:
-            continue
-
-        if utc_iso:
-            schedules.append(
-                GameSchedule(id=str(schedule_id), game_datetime_utc_iso=str(utc_iso))
-            )
-        elif legacy_iso:
-            # Interpret legacy time as Serbian local time (naive).
-            legacy_dt = datetime.fromisoformat(str(legacy_iso))
-            if legacy_dt.tzinfo is None:
-                legacy_dt = legacy_dt.replace(tzinfo=SERBIA_TZ)
-            legacy_utc = legacy_dt.astimezone(UTC)
-            schedules.append(
-                GameSchedule(id=str(schedule_id), game_datetime_utc_iso=legacy_utc.isoformat())
-            )
-    # newest first (game datetime)
+        s = _item_to_schedule(it)
+        if s:
+            schedules.append(s)
     schedules.sort(key=lambda s: s.game_datetime_utc, reverse=True)
     return schedules
+
+
+def get_game_schedule(schedule_id: str) -> Optional[GameSchedule]:
+    for s in list_game_schedules():
+        if s.id == str(schedule_id):
+            return s
+    return None
 
 
 def add_game_schedule(game_datetime: datetime) -> GameSchedule:
     """
     Add a schedule.
-    
+
     `game_datetime` is expected to be Serbian-local time (timezone-aware preferred).
     We'll store it internally as UTC.
     """
@@ -116,14 +148,51 @@ def add_game_schedule(game_datetime: datetime) -> GameSchedule:
         dt_local = dt_local.replace(tzinfo=SERBIA_TZ)
     dt_utc = dt_local.astimezone(UTC)
 
-    schedules = list_game_schedules()
     new_id = uuid.uuid4().hex
-    item = {"id": new_id, "game_datetime_utc_iso": dt_utc.isoformat()}
-    # Save append to raw store (keeps existing items)
+    item = {
+        "id": new_id,
+        "game_datetime_utc_iso": dt_utc.isoformat(),
+        "parse_mode": "comments",
+    }
     current_items = _load_raw()
     current_items.append(item)
     _save_raw(current_items)
     return GameSchedule(id=new_id, game_datetime_utc_iso=item["game_datetime_utc_iso"])
+
+
+def update_game_parse_mode(
+    schedule_id: str,
+    parse_mode: str,
+    match_url: Optional[str] = None,
+) -> bool:
+    items = _load_raw()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id")) != str(schedule_id):
+            continue
+        item["parse_mode"] = parse_mode
+        if match_url is not None:
+            item["match_url"] = match_url
+        if parse_mode == "comments":
+            item.pop("match_url", None)
+            item.pop("seen_scores", None)
+        _save_raw(items)
+        return True
+    return False
+
+
+def update_game_seen_scores(schedule_id: str, seen_scores: List[str]) -> bool:
+    items = _load_raw()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id")) != str(schedule_id):
+            continue
+        item["seen_scores"] = seen_scores
+        _save_raw(items)
+        return True
+    return False
 
 
 def delete_game_schedule(schedule_id: str) -> bool:
@@ -135,10 +204,14 @@ def delete_game_schedule(schedule_id: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Window helpers
+# ---------------------------------------------------------------------------
+
 def get_monitor_windows(now: datetime) -> List[Tuple[datetime, datetime]]:
     """
     Return list of active windows (UTC) that contain `now`.
-    
+
     `now` should be timezone-aware in UTC.
     """
     active: List[Tuple[datetime, datetime]] = []
@@ -147,7 +220,6 @@ def get_monitor_windows(now: datetime) -> List[Tuple[datetime, datetime]]:
         end = s.game_datetime_utc + timedelta(hours=2)
         if start <= now <= end:
             active.append((start, end))
-    # If overlaps, order doesn't really matter, but keep deterministic
     active.sort(key=lambda w: w[0])
     return active
 
@@ -165,4 +237,3 @@ def get_next_window_end(moment: datetime) -> Optional[datetime]:
     if not active:
         return None
     return max(end for _, end in active)
-

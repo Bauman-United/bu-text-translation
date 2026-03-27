@@ -20,11 +20,15 @@ from handlers.telegram_commands import (
     catch_existing_command,
     set_game_command,
     games_command,
+    match_command,
     set_game_day_callback,
     delete_game_callback,
+    game_type_callback,
+    set_parse_mode_callback,
     game_time_input_handler,
     remove_translation_callback,
-    set_group_stream_monitor
+    set_group_stream_monitor,
+    start_pending_site_monitors,
 )
 from monitors.group_stream_monitor import VKGroupStreamMonitor
 
@@ -50,28 +54,28 @@ def main():
         application.add_handler(CommandHandler("catch_existing", catch_existing_command))
         application.add_handler(CommandHandler("set_game", set_game_command))
         application.add_handler(CommandHandler("games", games_command))
+        application.add_handler(CommandHandler("match", match_command))
         
-        # Add callback query handler for remove translation buttons
+        # Callback query handlers
         application.add_handler(CallbackQueryHandler(remove_translation_callback, pattern="^remove:"))
         application.add_handler(CallbackQueryHandler(set_game_day_callback, pattern="^set_game_day:"))
         application.add_handler(CallbackQueryHandler(delete_game_callback, pattern="^del_game:"))
+        application.add_handler(CallbackQueryHandler(game_type_callback, pattern="^game_type:"))
+        application.add_handler(CallbackQueryHandler(set_parse_mode_callback, pattern="^set_parse:"))
 
-        # Handle plain text time input after choosing weekday via /set_game
+        # Catch-all plain-text handler (game time + match URL input)
         application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, game_time_input_handler)
         )
         
-        # Add error handler
+        # Error handler
         async def error_handler(update, context):
-            """Handle errors."""
             logger.error(f"Update {update} caused error {context.error}")
         
         application.add_error_handler(error_handler)
         
-        # Setup post-initialization
+        # Post-initialization
         async def post_init(application):
-            """Post-initialization setup for group monitoring and bot commands menu."""
-            # Set up bot commands menu
             commands = [
                 BotCommand("start", "Start the bot and see available commands"),
                 BotCommand("monitor", "Start monitoring a VK translation URL"),
@@ -81,6 +85,7 @@ def main():
                 BotCommand("catch_existing", "Start monitoring any currently live streams"),
                 BotCommand("set_game", "Schedule a game time (VK monitoring window)"),
                 BotCommand("games", "List scheduled games and delete them"),
+                BotCommand("match", "Parse match page and post goal commentary"),
             ]
             try:
                 await application.bot.set_my_commands(commands)
@@ -88,25 +93,29 @@ def main():
             except Exception as e:
                 logger.error(f"Error setting bot commands menu: {e}")
             
+            # Start VK group stream monitoring
             if config.is_group_monitoring_configured:
                 try:
-                    group_stream_monitor = VKGroupStreamMonitor(
+                    gsm = VKGroupStreamMonitor(
                         config.VK_GROUP, 
                         config.TELEGRAM_CHANNEL_ID, 
                         application, 
                         int(config.MY_ID)
                     )
-                    set_group_stream_monitor(group_stream_monitor)
-                    
-                    # Start group monitoring in background
-                    asyncio.create_task(group_stream_monitor.start_polling())
+                    set_group_stream_monitor(gsm)
+                    asyncio.create_task(gsm.start_polling())
                     logger.info(f"Started VK group stream monitoring for group {config.VK_GROUP}")
                 except Exception as e:
                     logger.error(f"Error starting group stream monitoring: {e}")
             else:
                 logger.warning("VK_GROUP not configured, group stream monitoring disabled")
+
+            # Resume site monitors for existing site-mode schedules
+            try:
+                start_pending_site_monitors(application, int(config.MY_ID))
+            except Exception as e:
+                logger.error(f"Error starting pending site monitors: {e}")
         
-        # Add post initialization handler
         application.post_init = post_init
         
         # Start the bot
