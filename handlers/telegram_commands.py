@@ -29,7 +29,7 @@ from utils.game_schedule import (
     update_game_parse_mode,
     update_game_seen_scores,
 )
-from utils.match_parser import GoalEvent, fetch_match_html, parse_match_page
+from utils.match_parser import GoalEvent, fetch_match_html, format_match_teams_summary, parse_match_page
 
 logger = logging.getLogger(__name__)
 
@@ -339,7 +339,7 @@ async def _handle_match_url_input(update: Update, context: ContextTypes.DEFAULT_
     # Try to parse the page
     try:
         html = await asyncio.get_event_loop().run_in_executor(None, fetch_match_html, match_url)
-        goals = parse_match_page(html)
+        parsed = parse_match_page(html)
     except Exception as e:
         logger.error(f"Error parsing match page for schedule {schedule_id}: {e}")
         await update.message.reply_text(
@@ -348,6 +348,8 @@ async def _handle_match_url_input(update: Update, context: ContextTypes.DEFAULT_
         )
         context.user_data[MATCH_URL_PENDING_KEY] = schedule_id
         return
+
+    goals = parsed.goals
 
     # Persist the parse mode + URL + already-seen scores
     seen_scores = [g.score for g in goals]
@@ -369,13 +371,20 @@ async def _handle_match_url_input(update: Update, context: ContextTypes.DEFAULT_
     if schedule:
         _start_site_monitor_for_schedule(schedule, context.application, update.effective_user.id)
 
-    goal_text = (
-        f"⚽ Найдено {len(goals)} гол(ов), опубликовано в канал."
-        if goals else "⚽ Голов пока нет."
-    )
+    if goals:
+        goal_text = f"⚽ Найдено {len(goals)} гол(ов), опубликовано в канал."
+    elif not parsed.timeline_present:
+        goal_text = (
+            "📋 Событий на странице пока нет (матч ещё не начался или лента событий недоступна)."
+        )
+    else:
+        goal_text = "⚽ Голов пока нет."
+
+    teams_text = format_match_teams_summary(parsed)
 
     await update.message.reply_text(
         f"✅ Ссылка сохранена. Режим: 🌐 Парсинг сайта\n"
+        f"{teams_text}\n"
         f"{goal_text}\n"
         f"🕐 Мониторинг: за 5 мин до игры, каждые 60 сек, в течение 2 часов."
     )
@@ -488,17 +497,26 @@ async def match_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         html = await asyncio.get_event_loop().run_in_executor(None, fetch_match_html, match_url)
-        goals = parse_match_page(html)
+        parsed = parse_match_page(html)
     except Exception as e:
         logger.error(f"Error parsing match page: {e}")
         await update.message.reply_text(f"❌ Ошибка при разборе страницы: {e}")
         return
 
+    goals = parsed.goals
+    teams_text = format_match_teams_summary(parsed)
+
     if not goals:
-        await update.message.reply_text("⚠️ Голов не найдено на странице матча")
+        if not parsed.timeline_present:
+            note = (
+                "📋 Событий на странице пока нет (матч ещё не начался или лента событий недоступна)."
+            )
+        else:
+            note = "⚠️ Голов на странице матча не найдено."
+        await update.message.reply_text(f"{note}\n\n{teams_text}")
         return
 
-    await update.message.reply_text(f"⚽ Найдено {len(goals)} гол(ов). Генерирую посты...")
+    await update.message.reply_text(f"⚽ Найдено {len(goals)} гол(ов). Генерирую посты...\n\n{teams_text}")
 
     config = Config()
     try:

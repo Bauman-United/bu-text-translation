@@ -81,7 +81,8 @@ class MatchSiteMonitor:
             html = await asyncio.get_event_loop().run_in_executor(
                 None, fetch_match_html, self.match_url,
             )
-            goals = parse_match_page(html)
+            parsed = parse_match_page(html)
+            goals = parsed.goals
         except Exception as e:
             logger.error(f"Site monitor {self.schedule_id}: error fetching page — {e}")
             return
