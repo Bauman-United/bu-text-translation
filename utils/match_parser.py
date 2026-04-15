@@ -6,6 +6,7 @@ determining which team scored and the resulting score.
 """
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -16,7 +17,8 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-TEAM_NAME = "Bauman United"
+DEFAULT_TEAM_NAME = "Bauman United"
+TEAM_NAME = (os.getenv("MATCH_PAGE_TEAM_NAME") or DEFAULT_TEAM_NAME).strip() or DEFAULT_TEAM_NAME
 
 
 @dataclass

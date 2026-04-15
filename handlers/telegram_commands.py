@@ -269,6 +269,13 @@ async def set_parse_mode_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
     elif mode == "site":
+        # Stop VK comment monitors — site mode doesn't need them
+        if active_translations:
+            for monitor in list(active_translations.values()):
+                monitor.is_active = False
+            active_translations.clear()
+            logger.info("Stopped VK comment monitors on user switch to site mode")
+
         context.user_data[MATCH_URL_PENDING_KEY] = schedule_id
         await query.edit_message_text(
             "🌐 Отправьте ссылку на страницу матча.\n"
@@ -312,7 +319,7 @@ async def game_time_input_handler(update: Update, context: ContextTypes.DEFAULT_
     game_dt = _compute_next_weekday_datetime(now, weekday_index, parsed_time)
     schedule = add_game_schedule(game_dt)
 
-    window_start = game_dt - timedelta(minutes=10)
+    window_start = game_dt - timedelta(minutes=30)
     window_end = game_dt + timedelta(hours=2)
 
     await update.message.reply_text(

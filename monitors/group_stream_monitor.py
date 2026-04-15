@@ -19,7 +19,11 @@ from utils.url_parser import extract_group_id
 from monitors.translation_monitor import VKTranslationMonitor
 from config.settings import Config
 from utils.error_notifier import send_error_notification
-from utils.game_schedule import is_time_in_any_window
+from utils.game_schedule import (
+    get_game_schedule,
+    get_schedules_in_window,
+    is_time_in_any_window,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,8 @@ class VKGroupStreamMonitor:
         # Track last seen wall post id to only process new posts
         self.last_wall_post_id: Optional[int] = None
         self.is_active = True
+        # Track parse_mode per schedule to detect changes
+        self._last_known_modes: dict[str, str] = {}
         
         # Initialize VK client with access token
         config = Config()
@@ -59,6 +65,12 @@ class VKGroupStreamMonitor:
     async def check_for_new_streams(self) -> bool:
         """
         Check for new wall posts in the VK group and start monitoring any live stream videos found.
+
+        Wall polling only happens when at least one "comments"-mode game is
+        inside its monitoring window.  When all active games are "site"-mode,
+        the wall is not polled and any VK comment monitors are stopped.
+
+        Also detects parse_mode changes and switches monitors accordingly.
         
         Returns:
             True if monitoring should continue, False if stopped
@@ -66,19 +78,28 @@ class VKGroupStreamMonitor:
         try:
             now = datetime.now(timezone.utc)
 
-            # Stop comment monitoring when we are outside all scheduled windows.
             from handlers.telegram_commands import get_active_translations
             active_translations = get_active_translations()
 
-            if not is_time_in_any_window(now):
+            # Detect parse_mode changes for schedules currently in any window.
+            all_schedules = get_schedules_in_window(now)
+            current_modes = {s.id: s.parse_mode for s in all_schedules}
+            await self._detect_mode_changes(current_modes)
+
+            # Only poll the wall when at least one "comments"-mode game is active.
+            comments_in_window = is_time_in_any_window(now, parse_mode="comments")
+
+            if not comments_in_window:
                 if active_translations:
                     for monitor in list(active_translations.values()):
                         monitor.is_active = False
                     active_translations.clear()
-                    logger.info("Outside scheduled monitoring windows: stopped all active stream monitors")
+                    logger.info(
+                        "No 'comments'-mode games in window: stopped all VK stream monitors"
+                    )
                 return True
             
-            # We are inside at least one scheduled window.
+            # We are inside at least one "comments" window.
             # If we already have an active stream being monitored, skip VK discovery to avoid extra VK calls.
             if active_translations:
                 logger.debug(
@@ -154,10 +175,10 @@ class VKGroupStreamMonitor:
                         title = video.get('title', 'Live Stream')
                         stream_url = self.vk_client.get_video_url(video)
 
-                        # Safety: only start monitoring if this wall post is within any window.
-                        if post_dt is not None and not is_time_in_any_window(post_dt):
+                        # Safety: only start monitoring if this wall post is within a "comments" window.
+                        if post_dt is not None and not is_time_in_any_window(post_dt, parse_mode="comments"):
                             logger.info(
-                                f"Skipping stream from wall post {post_id} because post_dt is outside windows "
+                                f"Skipping stream from wall post {post_id} because post_dt is outside 'comments' windows "
                                 f"(post_dt={post_dt.isoformat()})"
                             )
                             continue
@@ -219,10 +240,10 @@ class VKGroupStreamMonitor:
                     title = video.get('title', 'Live Stream')
                     stream_url = self.vk_client.get_video_url(video)
 
-                    # Only start monitoring if wall post date is within any scheduled windows.
-                    if post_dt is not None and not is_time_in_any_window(post_dt):
+                    # Only start monitoring if wall post date is within a "comments" window.
+                    if post_dt is not None and not is_time_in_any_window(post_dt, parse_mode="comments"):
                         logger.info(
-                            f"Skipping stream from wall post {post_id} because post_dt is outside windows "
+                            f"Skipping stream from wall post {post_id} because post_dt is outside 'comments' windows "
                             f"(post_dt={post_dt.isoformat()})"
                         )
                         continue
@@ -254,6 +275,53 @@ class VKGroupStreamMonitor:
             logger.error(f"Error checking for new streams: {e}")
             return True
     
+    async def _detect_mode_changes(self, current_modes: dict[str, str]):
+        """Compare current parse_modes with previously known ones and react to changes."""
+        for schedule_id, new_mode in current_modes.items():
+            old_mode = self._last_known_modes.get(schedule_id)
+            if old_mode is not None and old_mode != new_mode:
+                logger.info(
+                    f"parse_mode changed for schedule {schedule_id}: {old_mode} → {new_mode}"
+                )
+                await self._apply_mode_switch(schedule_id, old_mode, new_mode)
+
+        self._last_known_modes = dict(current_modes)
+
+    async def _apply_mode_switch(self, schedule_id: str, old_mode: str, new_mode: str):
+        """Stop monitors for old_mode and start monitors for new_mode."""
+        from handlers.telegram_commands import (
+            get_active_translations,
+            get_active_site_monitors,
+            _start_site_monitor_for_schedule,
+        )
+
+        if old_mode == "comments" and new_mode == "site":
+            active_translations = get_active_translations()
+            if active_translations:
+                for monitor in list(active_translations.values()):
+                    monitor.is_active = False
+                active_translations.clear()
+                logger.info("Stopped VK comment monitors due to mode switch → site")
+
+            schedule = get_game_schedule(schedule_id)
+            if schedule and schedule.match_url:
+                _start_site_monitor_for_schedule(schedule, self.app, self.user_id)
+            await self.send_notification(
+                "🔄 Обнаружена смена режима → 🌐 Парсинг сайта\n"
+                "VK мониторинг остановлен, запущен мониторинг сайта."
+            )
+
+        elif old_mode == "site" and new_mode == "comments":
+            active_site_monitors = get_active_site_monitors()
+            if schedule_id in active_site_monitors:
+                active_site_monitors[schedule_id].is_active = False
+                del active_site_monitors[schedule_id]
+                logger.info(f"Stopped site monitor {schedule_id} due to mode switch → comments")
+            await self.send_notification(
+                "🔄 Обнаружена смена режима → 📺 VK комментарии\n"
+                "Мониторинг сайта остановлен, начинается мониторинг стены VK."
+            )
+
     async def handle_new_stream(self, stream: dict):
         """Handle a new live stream found."""
         try:

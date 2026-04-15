@@ -3,7 +3,7 @@ Persistence and window calculations for scheduled games.
 
 We store multiple datetimes (one per scheduled game) and define an active monitoring
 window for each:
-  window_start = game_datetime - 10 minutes
+  window_start = game_datetime - 30 minutes
   window_end   = game_datetime + 2 hours
 
 Each game has a parse_mode ("comments" for VK live comments, "site" for match page
@@ -208,24 +208,53 @@ def delete_game_schedule(schedule_id: str) -> bool:
 # Window helpers
 # ---------------------------------------------------------------------------
 
-def get_monitor_windows(now: datetime) -> List[Tuple[datetime, datetime]]:
+WINDOW_BEFORE = timedelta(minutes=30)
+WINDOW_AFTER = timedelta(hours=2)
+
+
+def get_monitor_windows(
+    now: datetime,
+    parse_mode: Optional[str] = None,
+) -> List[Tuple[datetime, datetime]]:
     """
     Return list of active windows (UTC) that contain `now`.
 
     `now` should be timezone-aware in UTC.
+    If `parse_mode` is given, only schedules with that mode are considered.
     """
     active: List[Tuple[datetime, datetime]] = []
     for s in list_game_schedules():
-        start = s.game_datetime_utc - timedelta(minutes=10)
-        end = s.game_datetime_utc + timedelta(hours=2)
+        if parse_mode is not None and s.parse_mode != parse_mode:
+            continue
+        start = s.game_datetime_utc - WINDOW_BEFORE
+        end = s.game_datetime_utc + WINDOW_AFTER
         if start <= now <= end:
             active.append((start, end))
     active.sort(key=lambda w: w[0])
     return active
 
 
-def is_time_in_any_window(moment: datetime) -> bool:
-    return len(get_monitor_windows(moment)) > 0
+def is_time_in_any_window(
+    moment: datetime,
+    parse_mode: Optional[str] = None,
+) -> bool:
+    return len(get_monitor_windows(moment, parse_mode=parse_mode)) > 0
+
+
+def get_schedules_in_window(
+    moment: datetime,
+    parse_mode: Optional[str] = None,
+) -> List[GameSchedule]:
+    """Return schedules whose monitoring window contains `moment`."""
+    result: List[GameSchedule] = []
+    for s in list_game_schedules():
+        if parse_mode is not None and s.parse_mode != parse_mode:
+            continue
+        start = s.game_datetime_utc - WINDOW_BEFORE
+        end = s.game_datetime_utc + WINDOW_AFTER
+        if start <= moment <= end:
+            result.append(s)
+    return result
 
 
 def get_next_window_end(moment: datetime) -> Optional[datetime]:
