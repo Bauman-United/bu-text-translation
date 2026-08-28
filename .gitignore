@@ -1,5 +1,11 @@
 # Environment variables
 .env
+# `env/` below only matches a directory — spell the file out so a stray
+# secrets file named `env` cannot be committed.
+/env
+
+# Runtime state: game schedules and the VK refresh token
+/data/
 
 # Python
 __pycache__/

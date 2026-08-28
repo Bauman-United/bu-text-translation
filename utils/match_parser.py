@@ -93,9 +93,16 @@ def fetch_match_html(url: str) -> str:
 
 
 def _extract_surname(full_name: str) -> str:
-    """Extract surname (last word) from a full name like 'Егор Шевченко'."""
+    """
+    Extract the surname from a Join.Football player name.
+
+    The site renders names surname-first ("Шевченко Егор", "Молотков Константин"),
+    so the surname is the FIRST token. Taking the last one yielded given names,
+    which broke both the celebration-video lookup and the nicknames in the GPT
+    prompt (they are keyed by surname).
+    """
     parts = full_name.strip().split()
-    return parts[-1] if parts else full_name.strip()
+    return parts[0] if parts else full_name.strip()
 
 
 def _site_score_to_bu_first(score: str, our_team_position: int) -> str:

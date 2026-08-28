@@ -24,7 +24,11 @@ class Config:
         self.MY_ID = os.getenv('MY_ID')
         
         # VK API Configuration
+        # VK_ACCESS_TOKEN is only a fallback now: VK ID tokens obtained through
+        # the implicit flow expire after 24h. The bot prefers the refreshable
+        # token set in data/vk_token.json (see scripts/vk_authorize.py).
         self.VK_ACCESS_TOKEN = os.getenv('VK_ACCESS_TOKEN')
+        self.VK_APP_ID = os.getenv('VK_APP_ID')
         self.VK_GROUP = os.getenv('VK_GROUP')
         
         # OpenAI Configuration
@@ -52,10 +56,21 @@ class Config:
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
         
-        # VK_ACCESS_TOKEN and VK_GROUP are optional
-        if not self.VK_ACCESS_TOKEN:
-            logging.warning("VK_ACCESS_TOKEN not provided, VK API will use anonymous access")
-        
+        # VK credentials are optional at config level, but VK monitoring needs
+        # either a stored refreshable token set or a static VK_ACCESS_TOKEN.
+        from utils.vk_token_store import load_tokens
+
+        if not load_tokens() and not self.VK_ACCESS_TOKEN:
+            logging.warning(
+                "No VK tokens available (neither data/vk_token.json nor VK_ACCESS_TOKEN). "
+                "Run scripts/vk_authorize.py — VK monitoring is disabled until then."
+            )
+
+        if not self.VK_APP_ID:
+            logging.warning(
+                "VK_APP_ID not set — the bot cannot refresh VK tokens automatically"
+            )
+
         if not self.VK_GROUP:
             logging.warning("VK_GROUP not configured, group stream monitoring will be disabled")
         
@@ -72,8 +87,9 @@ class Config:
     
     @property
     def is_vk_configured(self) -> bool:
-        """Check if VK API is properly configured."""
-        return bool(self.VK_ACCESS_TOKEN)
+        """Check if any VK credentials are available (stored set or static token)."""
+        from utils.vk_token_store import load_tokens
+        return bool(load_tokens() or self.VK_ACCESS_TOKEN)
     
     @property
     def is_group_monitoring_configured(self) -> bool:

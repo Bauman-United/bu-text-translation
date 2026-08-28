@@ -6,18 +6,11 @@ services:
     env_file:
       - .env
     volumes:
-      # Mount .env file if you prefer to keep it outside container
-      # - ./.env:/app/.env:ro
-      # Mount logs directory if you want to persist logs
+      # Persistent state. MUST be mounted: it holds the game schedules and the
+      # VK refresh token — losing it means no monitoring windows and a manual
+      # re-run of scripts/vk_authorize.py.
+      - ./data:/app/data
+      # Logs
       - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
-    # Uncomment if you need to specify a network
-    # networks:
-    #   - bot-network
-
-# Uncomment if you need a network
-# networks:
-#   bot-network:
-#     driver: bridge
-

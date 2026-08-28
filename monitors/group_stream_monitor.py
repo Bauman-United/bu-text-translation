@@ -10,10 +10,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Set, Optional
 
-import vk_api
-
 from telegram.ext import Application
 
+from api.vk_auth import VKAuthError
 from api.vk_client import VKClient
 from utils.url_parser import extract_group_id
 from monitors.translation_monitor import VKTranslationMonitor
@@ -271,6 +270,16 @@ class VKGroupStreamMonitor:
             
             return True
             
+        except VKAuthError as e:
+            # Retrying cannot help until a human re-authorizes, and each retry
+            # fired another error notification every 30 seconds.
+            logger.error(f"Stopping group stream monitoring: VK auth failed — {e}")
+            await self.send_notification(
+                "🔑 <b>Мониторинг VK остановлен</b>\n\n"
+                "Авторизация VK недействительна и не обновляется автоматически.\n"
+                "Запусти на сервере: <code>python scripts/vk_authorize.py</code>"
+            )
+            return False
         except Exception as e:
             logger.error(f"Error checking for new streams: {e}")
             return True
@@ -343,6 +352,25 @@ class VKGroupStreamMonitor:
                 f"Ссылка на трансляцию матча: {stream_url}"
             )
             
+            # Reposted streams are owned by another community (the league).
+            # Announce the link, but don't spin up a comment monitor: those
+            # comments are not ours to read and never carry score updates.
+            try:
+                own_owner_id = -int(self.group_id)
+            except (TypeError, ValueError):
+                own_owner_id = None
+
+            if own_owner_id is not None and stream.get('owner_id') != own_owner_id:
+                logger.info(
+                    f"Stream {stream_url} belongs to {stream.get('owner_id')}, not to our group "
+                    f"{own_owner_id} — link posted, comment monitoring skipped"
+                )
+                await self.send_notification(
+                    "ℹ️ Это репост чужой трансляции — ссылка опубликована, "
+                    "но текстовая трансляция по комментариям не запускается."
+                )
+                return
+
             # Create and start monitoring the stream
             monitor = VKTranslationMonitor(
                 stream_url, 

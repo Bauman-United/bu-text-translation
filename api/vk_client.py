@@ -10,7 +10,11 @@ import logging
 import asyncio
 import sys
 import time
-from typing import Dict, List, Optional, Tuple, Callable, Awaitable
+from typing import Dict, List, Optional, Callable, Awaitable
+
+from api.vk_auth import VKAuthError, refresh_access_token
+from config.settings import Config
+from utils.vk_token_store import VKTokens, load_tokens, save_from_response
 
 logger = logging.getLogger(__name__)
 
@@ -128,388 +132,344 @@ else:
 
 
 class VKClient:
-    """VK API client wrapper."""
-    
-    # Shared cache for video info across all instances
-    _video_info_cache: Dict[str, Tuple[Dict, float]] = {}
-    _cache_ttl = 30  # Cache video info for 30 seconds
-    
-    def __init__(self, access_token: Optional[str] = None, error_notifier: Optional[Callable[[str, str, Optional[str], str], Awaitable[None]]] = None):
+    """
+    VK API client wrapper.
+
+    Authentication comes from `data/vk_token.json` when it exists (a refreshable
+    VK ID token set written by scripts/vk_authorize.py). A static VK_ACCESS_TOKEN
+    still works as a fallback, but VK ID caps those at 24 hours, so the stored
+    set is what keeps the bot running unattended.
+    """
+
+    # Refresh is shared process-wide: several monitors run concurrently and must
+    # not race each other into refreshing the same rotating refresh token.
+    _refresh_lock = asyncio.Lock()
+    # Notify the owner about a dead authorization only once per process.
+    _auth_failure_reported = False
+
+    def __init__(
+        self,
+        access_token: Optional[str] = None,
+        error_notifier: Optional[Callable[[str, str, Optional[str], str], Awaitable[None]]] = None,
+    ):
         """
         Initialize VK API client.
-        
+
         Args:
-            access_token: VK API access token (optional, will use anonymous access if not provided)
-            error_notifier: Async function to call when errors occur: (request_info, error_code, error_message)
+            access_token: Static fallback token, used only when no stored token set exists
+            error_notifier: Async callback (service_name, request_info, error_code, error_message)
         """
-        self.access_token = access_token
+        self.error_notifier = error_notifier
+        self.rate_limiter = VKRateLimiter()
+
+        self._static_token = access_token
+        self._tokens: Optional[VKTokens] = load_tokens()
+        self._session_token: Optional[str] = None
         self.vk_session = None
         self.vk_api = None
-        self.error_notifier = error_notifier
-        self.rate_limiter = VKRateLimiter()  # Shared rate limiter instance
-        self._initialize_vk()
-    
-    def _initialize_vk(self):
-        """Initialize VK API session."""
-        if self.access_token and self.access_token.strip():
-            logger.info("Initializing VK API with access token")
-            self.vk_session = vk_api.VkApi(token=self.access_token)
-            self.vk_api = self.vk_session.get_api()
+
+        if self._tokens:
+            logger.info(
+                "VK auth: using stored token set%s"
+                % (" (refreshable)" if self._tokens.can_refresh else " (no refresh token)")
+            )
+        elif self._static_token:
+            logger.warning(
+                "VK auth: using static VK_ACCESS_TOKEN — it cannot be refreshed and "
+                "VK ID expires these after 24h. Run scripts/vk_authorize.py."
+            )
         else:
-            logger.warning("VK_ACCESS_TOKEN not provided or empty, using anonymous access")
-            self.vk_session = vk_api.VkApi()
-            self.vk_api = self.vk_session.get_api()
-    
-    async def get_video_info(self, owner_id: str, video_id: str, use_cache: bool = True) -> Optional[Dict]:
+            logger.error("VK auth: no credentials at all — VK calls will fail")
+
+    # ------------------------------------------------------------------
+    # Authentication
+    # ------------------------------------------------------------------
+
+    @property
+    def access_token(self) -> Optional[str]:
+        """Current access token, whichever source it came from."""
+        if self._tokens:
+            return self._tokens.access_token
+        return self._static_token
+
+    def _rebuild_session(self, token: str):
+        """(Re)create the vk_api session bound to `token`."""
+        self.vk_session = vk_api.VkApi(token=token)
+        self.vk_api = self.vk_session.get_api()
+        self._session_token = token
+
+    async def _refresh_tokens(self) -> bool:
         """
-        Get video information from VK.
-        
-        Args:
-            owner_id: Video owner ID
-            video_id: Video ID
-            use_cache: Whether to use cached data if available (default: True)
-            
+        Swap the refresh token for a fresh access token.
+
         Returns:
-            Video information dictionary or None if not found
+            True when a new access token is in place, False when we cannot refresh.
         """
-        cache_key = f"{owner_id}_{video_id}"
-        current_time = time.time()
-        
-        # Check cache first
-        if use_cache and cache_key in self._video_info_cache:
-            cached_info, cache_time = self._video_info_cache[cache_key]
-            if current_time - cache_time < self._cache_ttl:
-                logger.debug(f"Using cached video info for {cache_key}")
-                return cached_info
-            else:
-                # Cache expired, remove it
-                del self._video_info_cache[cache_key]
-        
-        retry_count = 0
-        max_retries = 3
-        
-        while True:
+        async with self._refresh_lock:
+            # Another coroutine may have refreshed while we waited for the lock.
+            latest = load_tokens()
+            if latest and latest.access_token != (self._tokens.access_token if self._tokens else None):
+                if not latest.is_expired:
+                    logger.info("VK auth: picked up token refreshed by another monitor")
+                    self._tokens = latest
+                    return True
+                self._tokens = latest
+
+            tokens = self._tokens
+            if not tokens or not tokens.can_refresh:
+                logger.error(
+                    "VK auth: no refresh token available — run scripts/vk_authorize.py"
+                )
+                return False
+
+            config = Config()
+            if not config.VK_APP_ID:
+                logger.error("VK auth: VK_APP_ID is not set, cannot refresh")
+                return False
+
+            logger.info("VK auth: refreshing access token")
             try:
-                # Check if we have access token for video operations
-                if not self.access_token or not self.access_token.strip():
-                    logger.error("VK_ACCESS_TOKEN required for video operations")
-                    raise ValueError("VK_ACCESS_TOKEN is required for video operations")
-                
-                # Wait for rate limiter before making API call
-                request_info = f"video.get(owner_id={owner_id}, videos={owner_id}_{video_id})"
-                logger.info(f"Making VK API request: {request_info}")
-                await self.rate_limiter.wait_if_needed()
-                
-                try:
-                    # Run blocking vk_api call in thread pool to avoid blocking event loop
-                    logger.debug(f"Executing VK API request: {request_info}")
-                    video_info = await _run_in_thread(
-                        self.vk_api.video.get,
-                        owner_id=owner_id,
-                        videos=f"{owner_id}_{video_id}"
-                    )
-                    logger.info(f"VK API request completed: {request_info}")
-                    
-                    if not video_info or 'items' not in video_info or len(video_info['items']) == 0:
-                        logger.error("Video not found or access denied")
-                        return None
-                    
-                    result = video_info['items'][0]
-                    
-                    # Cache the result
-                    self._video_info_cache[cache_key] = (result, current_time)
-                    
-                    # Clean up old cache entries (keep only last 100 entries)
-                    if len(self._video_info_cache) > 100:
-                        # Remove oldest entries
-                        sorted_cache = sorted(self._video_info_cache.items(), key=lambda x: x[1][1])
-                        for key, _ in sorted_cache[:-100]:
-                            del self._video_info_cache[key]
-                    
-                    return result
-                finally:
-                    # Mark call as complete to update rate limiter timing
-                    await self.rate_limiter.mark_call_complete()
-                
-            except vk_api.exceptions.ApiError as e:
-                error_code = getattr(e, 'code', None)
-                error_code_str = str(error_code) if error_code is not None else None
-                request_info = f"video.get(owner_id={owner_id}, videos={owner_id}_{video_id})"
-                
-                # Handle rate limit errors with retry
-                if error_code == 29:  # Rate limit error
-                    logger.error(f"VK API rate limit error on request: {request_info} - Error: {e}")
-                    if await self.rate_limiter.handle_rate_limit_error(retry_count, max_retries):
-                        retry_count += 1
-                        logger.info(f"Retrying VK API request: {request_info} (attempt {retry_count + 1}/{max_retries + 1})")
-                        continue
-                    else:
-                        logger.error(f"VK API rate limit error after {max_retries} retries: {e} - Request: {request_info}")
-                        if self.error_notifier:
-                            try:
-                                await self.error_notifier("VK API", request_info, error_code_str, str(e))
-                            except Exception as notifier_error:
-                                logger.error(f"Failed to call error notifier: {notifier_error}", exc_info=True)
-                        raise
-                else:
-                    logger.error(f"VK API error getting video info: {e} - Request: {request_info}")
-                    if self.error_notifier:
-                        try:
-                            await self.error_notifier("VK API", request_info, error_code_str, str(e))
-                            logger.debug(f"Error notifier called for VK API error: {error_code_str}")
-                        except Exception as notifier_error:
-                            logger.error(f"Failed to call error notifier: {notifier_error}", exc_info=True)
-                    else:
-                        logger.warning("Error notifier is not set for VK client")
-                    raise
+                response = await _run_in_thread(
+                    refresh_access_token,
+                    config.VK_APP_ID,
+                    tokens.refresh_token,
+                    tokens.device_id,
+                )
+            except VKAuthError as e:
+                logger.error(f"VK auth: refresh failed — {e}")
+                return False
             except Exception as e:
-                request_info = f"video.get(owner_id={owner_id}, videos={owner_id}_{video_id})"
-                logger.error(f"Error getting video info: {e} - Request: {request_info}")
-                if self.error_notifier:
-                    try:
-                        await self.error_notifier("VK API", request_info, None, str(e))
-                        logger.debug(f"Error notifier called for general error")
-                    except Exception as notifier_error:
-                        logger.error(f"Failed to call error notifier: {notifier_error}", exc_info=True)
-                else:
-                    logger.warning("Error notifier is not set for VK client")
+                logger.error(f"VK auth: unexpected refresh error — {e}")
+                return False
+
+            self._tokens = save_from_response(response, fallback_device_id=tokens.device_id)
+            logger.info(
+                "VK auth: access token refreshed, valid for %s sec"
+                % int(self._tokens.seconds_left or 0)
+            )
+            return True
+
+    async def _ensure_session(self) -> None:
+        """Make sure `self.vk_api` is bound to a live, non-expired token."""
+        if self._tokens and self._tokens.is_expired:
+            logger.info("VK auth: stored access token expired or about to expire")
+            if not await self._refresh_tokens():
+                message = (
+                    "VK access token expired and could not be refreshed. "
+                    "Run scripts/vk_authorize.py to re-authorize."
+                )
+                await self._report_auth_failure("token refresh", message)
+                raise VKAuthError(message)
+
+        token = self.access_token
+        if not token or not token.strip():
+            message = "No VK access token available. Run scripts/vk_authorize.py."
+            await self._report_auth_failure("token lookup", message)
+            raise VKAuthError(message)
+
+        if token != self._session_token:
+            self._rebuild_session(token)
+
+    async def _report_auth_failure(self, request_info: str, message: str) -> None:
+        """Tell the owner once that authorization is dead, instead of every 30s."""
+        if VKClient._auth_failure_reported:
+            return
+        VKClient._auth_failure_reported = True
+        if self.error_notifier:
+            try:
+                await self.error_notifier(
+                    "VK API",
+                    request_info,
+                    "auth",
+                    f"{message}\n\nЗапусти: python scripts/vk_authorize.py",
+                )
+            except Exception as e:
+                logger.error(f"Failed to report VK auth failure: {e}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Generic call plumbing
+    # ------------------------------------------------------------------
+
+    async def _call(self, method_path: str, request_info: str, **params):
+        """
+        Execute one VK API method with rate limiting, token refresh and retries.
+
+        Handles two recoverable conditions:
+          * code 5  (auth failed)  — refresh the token once, then retry
+          * code 29 (rate limit)   — exponential backoff, up to 3 attempts
+
+        Args:
+            method_path: Dotted VK method name, e.g. "wall.get"
+            request_info: Human-readable description used in error notifications
+
+        Raises:
+            VKAuthError: authorization is dead and cannot be recovered
+            vk_api.exceptions.ApiError: any other VK-side failure
+        """
+        rate_limit_retries = 0
+        max_rate_limit_retries = 3
+        auth_retried = False
+
+        while True:
+            await self._ensure_session()
+
+            method = self.vk_api
+            for part in method_path.split("."):
+                method = getattr(method, part)
+
+            logger.info(f"Making VK API request: {request_info}")
+            await self.rate_limiter.wait_if_needed()
+            try:
+                result = await _run_in_thread(method, **params)
+                logger.info(f"VK API request completed: {request_info}")
+                return result
+            except vk_api.exceptions.ApiError as e:
+                error_code = getattr(e, "code", None)
+
+                if error_code == 5 and not auth_retried:
+                    # Token died mid-flight (expired early, or revoked).
+                    auth_retried = True
+                    logger.warning(
+                        f"VK API auth error on {request_info}, attempting token refresh"
+                    )
+                    if await self._refresh_tokens():
+                        continue
+                    await self._report_auth_failure(request_info, str(e))
+                    raise VKAuthError(f"VK authorization failed and refresh did not help: {e}")
+
+                if error_code == 5:
+                    await self._report_auth_failure(request_info, str(e))
+                    raise VKAuthError(f"VK authorization failed: {e}")
+
+                if error_code == 29:
+                    logger.error(f"VK API rate limit on {request_info}: {e}")
+                    if await self.rate_limiter.handle_rate_limit_error(
+                        rate_limit_retries, max_rate_limit_retries
+                    ):
+                        rate_limit_retries += 1
+                        continue
+                    await self._notify_error(request_info, str(error_code), str(e))
+                    raise
+
+                logger.error(f"VK API error on {request_info}: {e}")
+                await self._notify_error(request_info, str(error_code) if error_code else None, str(e))
                 raise
-    
+            except VKAuthError:
+                raise
+            except Exception as e:
+                logger.error(f"Error on {request_info}: {e}")
+                await self._notify_error(request_info, None, str(e))
+                raise
+            finally:
+                await self.rate_limiter.mark_call_complete()
+
+    async def _notify_error(self, request_info: str, error_code: Optional[str], message: str):
+        """Send an error notification, never letting the notifier break the call path."""
+        if not self.error_notifier:
+            logger.warning("Error notifier is not set for VK client")
+            return
+        try:
+            await self.error_notifier("VK API", request_info, error_code, message)
+        except Exception as e:
+            logger.error(f"Failed to call error notifier: {e}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     async def get_video_comments(self, owner_id: str, video_id: str, count: int = 100) -> List[Dict]:
         """
-        Get comments for a video.
-        
+        Get the most recent comments for a video, oldest-first.
+
+        VK caps `count` at 100 per call. Sorting descending and reversing gives us
+        the newest 100 in one request — with a 30s poll interval the bot cannot
+        fall behind, and long matches no longer get stuck on the first 100
+        comments the way ascending order did.
+
         Args:
             owner_id: Video owner ID
             video_id: Video ID
-            count: Number of comments to retrieve
-            
+            count: How many recent comments to fetch (max 100)
+
         Returns:
-            List of comment dictionaries
+            List of comment dictionaries in chronological order
         """
-        retry_count = 0
-        max_retries = 3
-        
-        while True:
-            try:
-                # Check if we have access token for comment operations
-                if not self.access_token or not self.access_token.strip():
-                    logger.error("VK_ACCESS_TOKEN required for comment operations")
-                    raise ValueError("VK_ACCESS_TOKEN is required for comment operations")
-                
-                # Wait for rate limiter before making API call
-                request_info = f"video.getComments(owner_id={owner_id}, video_id={video_id}, count={count})"
-                logger.info(f"Making VK API request: {request_info}")
-                await self.rate_limiter.wait_if_needed()
-                
-                try:
-                    # Run blocking vk_api call in thread pool to avoid blocking event loop
-                    logger.debug(f"Executing VK API request: {request_info}")
-                    comments = await _run_in_thread(
-                        self.vk_api.video.getComments,
-                        owner_id=owner_id,
-                        video_id=video_id,
-                        sort='asc',
-                        count=count
-                    )
-                    logger.info(f"VK API request completed: {request_info}")
-                    
-                    if 'items' not in comments:
-                        return []
-                    
-                    return comments['items']
-                finally:
-                    # Mark call as complete to update rate limiter timing
-                    await self.rate_limiter.mark_call_complete()
-                
-            except vk_api.exceptions.ApiError as e:
-                error_code = getattr(e, 'code', None)
-                error_code_str = str(error_code) if error_code is not None else None
-                request_info = f"video.getComments(owner_id={owner_id}, video_id={video_id})"
-                
-                # Handle rate limit errors with retry
-                if error_code == 29:  # Rate limit error
-                    logger.error(f"VK API rate limit error on request: {request_info} - Error: {e}")
-                    if await self.rate_limiter.handle_rate_limit_error(retry_count, max_retries):
-                        retry_count += 1
-                        logger.info(f"Retrying VK API request: {request_info} (attempt {retry_count + 1}/{max_retries + 1})")
-                        continue
-                    else:
-                        logger.error(f"VK API rate limit error after {max_retries} retries: {e} - Request: {request_info}")
-                        if self.error_notifier:
-                            await self.error_notifier("VK API", request_info, error_code_str, str(e))
-                        raise
-                else:
-                    logger.error(f"VK API error getting comments: {e}")
-                    if self.error_notifier:
-                        await self.error_notifier("VK API", request_info, error_code_str, str(e))
-                    raise
-            except Exception as e:
-                logger.error(f"Error getting comments: {e}")
-                request_info = f"video.getComments(owner_id={owner_id}, video_id={video_id})"
-                if self.error_notifier:
-                    await self.error_notifier("VK API", request_info, None, str(e))
-                raise
-    
-    async def get_group_videos(self, group_id: str, count: int = 20) -> List[Dict]:
-        """
-        Get videos from a VK group using multiple methods.
-        
-        Args:
-            group_id: VK group ID
-            count: Number of videos to retrieve
-            
-        Returns:
-            List of video dictionaries
-        """
-        all_videos = []
-        
-        try:
-            # Check if we have access token for group operations
-            if not self.access_token or not self.access_token.strip():
-                logger.error("VK_ACCESS_TOKEN required for group video operations")
-                raise ValueError("VK_ACCESS_TOKEN is required for group video operations")
-            
-            # Convert group_id to integer and make it negative for groups
-            owner_id = -int(group_id)
-            logger.info(f"Getting videos for group {group_id} (owner_id: {owner_id})")
-            
-            # Get videos from wall posts (live streams are often posted on wall)
-            try:
-                # Wait for rate limiter before making API call
-                request_info = f"wall.get(owner_id={owner_id}, count={min(count * 2, 100)}, filter=all)"
-                logger.info(f"Making VK API request: {request_info}")
-                await self.rate_limiter.wait_if_needed()
-                
-                try:
-                    # Run blocking vk_api call in thread pool to avoid blocking event loop
-                    logger.debug(f"Executing VK API request: {request_info}")
-                    wall_posts = await _run_in_thread(
-                        self.vk_api.wall.get,
-                        owner_id=owner_id,
-                        count=min(count * 2, 100),  # Get more posts to find videos
-                        filter='all'  # Get all posts, not just owner's
-                    )
-                    logger.info(f"VK API request completed: {request_info}")
-                finally:
-                    # Mark call as complete to update rate limiter timing
-                    await self.rate_limiter.mark_call_complete()
-                
-                if wall_posts and 'items' in wall_posts:
-                    wall_videos = []
-                    for post in wall_posts['items']:
-                        # Check for video attachments in the post
-                        attachments = post.get('attachments', [])
-                        for attachment in attachments:
-                            if attachment.get('type') == 'video':
-                                video_data = attachment.get('video', {})
-                                if video_data:
-                                    # Ensure we have owner_id and id
-                                    if 'owner_id' not in video_data:
-                                        video_data['owner_id'] = owner_id
-                                    wall_videos.append(video_data)
-                    
-                    if wall_videos:
-                        logger.info(f"Found {len(wall_videos)} videos from wall posts")
-                        all_videos.extend(wall_videos)
-            except Exception as e:
-                logger.warning(f"Error getting videos from wall posts: {e}")
-            
-            if not all_videos:
-                logger.warning("No videos found in group or access denied")
-                return []
-            
-            logger.info(f"Total unique videos found: {len(all_videos)}")
-            return all_videos
-            
-        except vk_api.exceptions.ApiError as e:
-            error_code = getattr(e, 'code', None)
-            error_code_str = str(error_code) if error_code is not None else None
-            request_info = f"wall.get(group_id={group_id})"
-            
-            # Handle rate limit errors - don't retry here, let caller handle it
-            if error_code == 29:
-                logger.warning(f"VK API rate limit error getting group videos: {e}")
-            else:
-                logger.error(f"VK API error getting group videos: {e}")
-            
-            if self.error_notifier:
-                await self.error_notifier("VK API", request_info, error_code_str, str(e))
-            raise
-        except Exception as e:
-            logger.error(f"Error getting group videos: {e}")
-            request_info = f"wall.get(group_id={group_id})"
-            if self.error_notifier:
-                await self.error_notifier("VK API", request_info, None, str(e))
-            raise
-    
+        request_info = f"video.getComments(owner_id={owner_id}, video_id={video_id}, count={count})"
+        comments = await self._call(
+            "video.getComments",
+            request_info,
+            owner_id=owner_id,
+            video_id=video_id,
+            sort="desc",
+            count=min(count, 100),
+        )
+
+        items = (comments or {}).get("items") or []
+        # VK returned newest-first; callers expect chronological order.
+        return list(reversed(items))
+
     async def get_group_wall_posts(self, group_id: str, count: int = 20) -> List[Dict]:
         """
         Get recent wall posts for a VK group.
-        
+
         Args:
             group_id: VK group ID
             count: Number of posts to retrieve
-        
+
         Returns:
             List of wall post dictionaries (newest first)
         """
-        try:
-            if not self.access_token or not self.access_token.strip():
-                logger.error("VK_ACCESS_TOKEN required for wall operations")
-                raise ValueError("VK_ACCESS_TOKEN is required for wall operations")
-            
-            owner_id = -int(group_id)
-            request_info = f"wall.get(owner_id={owner_id}, count={min(count, 100)}, filter=all)"
-            logger.info(f"Making VK API request: {request_info}")
-            
-            await self.rate_limiter.wait_if_needed()
-            try:
-                wall_posts = await _run_in_thread(
-                    self.vk_api.wall.get,
-                    owner_id=owner_id,
-                    count=min(count, 100),
-                    filter='all'
-                )
-            finally:
-                await self.rate_limiter.mark_call_complete()
-            
-            items = (wall_posts or {}).get('items') or []
-            if not items:
-                logger.debug("wall.get returned no items")
-                return []
-            
-            return items
-        
-        except vk_api.exceptions.ApiError as e:
-            error_code = getattr(e, 'code', None)
-            error_code_str = str(error_code) if error_code is not None else None
-            request_info = f"wall.get(group_id={group_id})"
-            
-            if error_code == 29:
-                logger.warning(f"VK API rate limit error getting wall posts: {e}")
-            else:
-                logger.error(f"VK API error getting wall posts: {e}")
-            
-            if self.error_notifier:
-                await self.error_notifier("VK API", request_info, error_code_str, str(e))
-            raise
-        except Exception as e:
-            logger.error(f"Error getting wall posts: {e}")
-            request_info = f"wall.get(group_id={group_id})"
-            if self.error_notifier:
-                await self.error_notifier("VK API", request_info, None, str(e))
-            raise
-    
+        owner_id = -int(group_id)
+        request_info = f"wall.get(owner_id={owner_id}, count={min(count, 100)}, filter=all)"
+        wall_posts = await self._call(
+            "wall.get",
+            request_info,
+            owner_id=owner_id,
+            count=min(count, 100),
+            filter="all",
+        )
+
+        items = (wall_posts or {}).get("items") or []
+        if not items:
+            logger.debug("wall.get returned no items")
+        return items
+
+    async def get_group_videos(self, group_id: str, count: int = 20) -> List[Dict]:
+        """
+        Get videos attached to a group's recent wall posts.
+
+        Args:
+            group_id: VK group ID
+            count: Number of videos to retrieve
+
+        Returns:
+            List of video dictionaries
+        """
+        posts = await self.get_group_wall_posts(group_id, count=min(count * 2, 100))
+
+        all_videos: List[Dict] = []
+        owner_id = -int(group_id)
+        for post in posts:
+            for video_data in self.extract_videos_from_wall_post(post):
+                video_data.setdefault("owner_id", owner_id)
+                all_videos.append(video_data)
+
+        if not all_videos:
+            logger.warning("No videos found in group or access denied")
+            return []
+
+        logger.info(f"Total videos found: {len(all_videos)}")
+        return all_videos
+
     def extract_videos_from_wall_post(self, post: Dict) -> List[Dict]:
         """
         Extract attached videos from a wall post.
-        
+
         Note: video objects from wall attachments typically already include live fields
-        (e.g., live/live_status/is_mobile_live) when applicable.
+        (e.g. live/live_status/is_mobile_live) when applicable.
         """
         videos: List[Dict] = []
-        
+
         def _extract_from_attachments(attachments: List[Dict]):
             for attachment in attachments or []:
                 atype = attachment.get('type')
@@ -518,91 +478,91 @@ class VKClient:
                     if video_data:
                         videos.append(video_data)
                 elif atype == 'link':
-                    # Sometimes a wall post contains a link to a video/live, not a direct video attachment.
-                    # We'll log these at the monitor layer; parsing the link into a video object requires
-                    # additional API calls (video.get) which we intentionally avoid here.
+                    # Sometimes a wall post contains a link to a video/live, not a direct video
+                    # attachment. Parsing the link into a video object requires additional API
+                    # calls (video.get) which we intentionally avoid here.
                     continue
-        
+
         # Direct attachments on the post
         _extract_from_attachments((post or {}).get('attachments') or [])
-        
+
         # Reposts: attachments can be inside copy_history (list of nested post objects)
         for parent in (post or {}).get('copy_history') or []:
             _extract_from_attachments((parent or {}).get('attachments') or [])
-        
+
         return videos
-    
+
     def is_live_stream(self, video: Dict) -> bool:
         """
         Check if a video is a live stream.
-        
+
         Args:
             video: Video dictionary from VK API
-            
+
         Returns:
             True if video is a live stream, False otherwise
         """
         live_status = video.get('live')
         live_status_str = video.get('live_status', '')
         is_mobile_live = video.get('is_mobile_live', False)
-        
+
         # Primary check: live field == 1 or live_status == 'started'
         # live can be: None (not a stream), 1 (live), 2 (finished)
         # live_status can be: '' (not a stream), 'started' (live), 'finished' (ended)
         is_live = live_status == 1 or live_status_str == 'started'
-        
+
         # Additional check: is_mobile_live indicates a mobile live stream
         # BUT only trust it if live_status is NOT 'finished' (to avoid false positives on old streams)
         if is_mobile_live and live_status_str != 'finished':
             is_live = True
             logger.info(f"Video {video.get('id')} detected as live via is_mobile_live=True (live_status={live_status_str})")
-        
+
         # Additional check: if live field exists and is 1, it's definitely live
         # Also check if the video type indicates it's a live stream
         video_type = video.get('type', '')
         if video_type == 'live' or (live_status is not None and live_status == 1):
             is_live = True
-        
+
         # If live_status is explicitly 'finished', it's not live (even if is_mobile_live is True)
         if live_status_str == 'finished' and live_status != 1:
             is_live = False
-        
+
         return is_live
-    
+
     def is_stream_ended(self, video: Dict) -> bool:
         """
         Check if a live stream has ended.
-        
+
         Args:
             video: Video dictionary from VK API
-            
+
         Returns:
             True if stream has ended, False otherwise
         """
         live_status = video.get('live')
         live_status_str = video.get('live_status', '')
-        
+
         return live_status == 2 or live_status_str == 'finished'
-    
+
     def get_video_url(self, video: Dict) -> str:
         """
         Generate VK video URL from video dictionary.
-        
+
         Args:
             video: Video dictionary from VK API
-            
+
         Returns:
             VK video URL
         """
         return f"https://vk.com/video{video['owner_id']}_{video['id']}"
-    
+
     def get_video_id(self, video: Dict) -> str:
         """
         Generate video ID string from video dictionary.
-        
+
         Args:
             video: Video dictionary from VK API
-            
+
         Returns:
             Video ID string in format "owner_id_video_id"
         """

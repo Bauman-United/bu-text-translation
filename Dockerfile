@@ -22,8 +22,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code
 COPY . .
 
-# Create a non-root user for security
-RUN useradd -m -u 1000 appuser && \
+# Create a non-root user for security. Pre-create the state dirs so the
+# container can write schedules and the VK token store when they are mounted.
+RUN mkdir -p /app/data /app/logs && \
+    useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app
 
 # Switch to non-root user
