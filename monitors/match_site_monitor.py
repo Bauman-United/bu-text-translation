@@ -7,32 +7,25 @@ to the Telegram channel with GPT-generated commentary.
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Set
+from typing import Optional, Set
 
 from telegram.ext import Application
 
-from config.settings import Config
 from utils.error_notifier import send_error_notification
-from utils.match_parser import GoalEvent, fetch_match_html, parse_match_page
+from services.goal_announcer import GoalAnnouncer
+from utils.match_parser import fetch_match_html, parse_match_page
 
 logger = logging.getLogger(__name__)
 
 
-def _get_celebration_video_path(surname_lower: str) -> Optional[str]:
-    """Standalone copy of the celebration-video lookup."""
-    if surname_lower in ["богомолов", "багич"]:
-        return "celebrations/богомолов.mp4"
-    elif surname_lower == "заночуев":
-        return "celebrations/заночуев.mp4"
-    elif surname_lower in ["панфер", "панфёр", "панферов", "панфёров"]:
-        return "celebrations/панферов.mp4"
-    elif surname_lower in ["писарь", "писарев"]:
-        return "celebrations/писарев.mp4"
-    elif surname_lower in ["шева", "шевченко"]:
-        return "celebrations/шевченко.mp4"
-    else:
-        return "celebrations/другие.mp4"
+def _score_to_pair(score: str) -> Optional[tuple]:
+    """Turn a timeline score like "2 : 1" into (2, 1)."""
+    numbers = re.findall(r"\d+", score or "")
+    if len(numbers) < 2:
+        return None
+    return int(numbers[0]), int(numbers[1])
 
 
 class MatchSiteMonitor:
@@ -56,8 +49,8 @@ class MatchSiteMonitor:
         self.user_id = user_id
         self.is_active = True
         self.seen_scores: Set[str] = seen_scores if seen_scores is not None else set()
-        self.message_history: List[str] = []
 
+        self.announcer = None
         self.gpt_service = None
         try:
             from services.gpt_service import GPTCommentaryService
@@ -70,6 +63,12 @@ class MatchSiteMonitor:
             self.gpt_service = GPTCommentaryService(error_notifier=gpt_error_notifier)
         except Exception as e:
             logger.warning(f"GPT service not available for site monitor: {e}")
+
+        # Shared with the VK monitor and the manual translation: whoever reports
+        # a goal first posts it, the others skip it.
+        self.announcer = GoalAnnouncer(
+            app, channel_id, user_id=user_id, gpt_service=self.gpt_service
+        )
 
     # ------------------------------------------------------------------
     # Goal checking
@@ -94,63 +93,21 @@ class MatchSiteMonitor:
         logger.info(f"Site monitor {self.schedule_id}: {len(new_goals)} new goal(s)")
 
         for goal in new_goals:
-            message = await self._generate_message(goal)
-            await self._post_to_channel(goal, message)
+            pair = _score_to_pair(goal.score)
+            if pair is None:
+                logger.warning(f"Site monitor {self.schedule_id}: unparseable score {goal.score!r}")
+                continue
+
+            await self.announcer.announce(
+                pair[0],
+                pair[1],
+                scorer_name=goal.scorer_name,
+                scorer_surname=goal.scorer_surname,
+            )
             self.seen_scores.add(goal.score)
-            self.message_history.append(message)
-            if len(self.message_history) > 10:
-                self.message_history = self.message_history[-10:]
 
         from utils.game_schedule import update_game_seen_scores
         update_game_seen_scores(self.schedule_id, list(self.seen_scores))
-
-    async def _generate_message(self, goal: GoalEvent) -> str:
-        score_normalized = goal.score.replace(" ", "").replace(":", "-")
-
-        if self.gpt_service and self.gpt_service.is_available():
-            gpt_msg = await self.gpt_service.generate_commentary(
-                self.message_history,
-                score_normalized,
-                is_our_goal=goal.is_our_goal,
-                scorer_surname=goal.scorer_surname,
-            )
-            if gpt_msg:
-                return gpt_msg
-
-        if goal.is_our_goal:
-            if goal.scorer_name:
-                return f"⚽ Забиваем! Гол забил {goal.scorer_name}. Счет: {score_normalized}"
-            return f"⚽ Забиваем! Счет: {score_normalized}"
-        return f"Пропускаем. Счет: {score_normalized}"
-
-    async def _post_to_channel(self, goal: GoalEvent, message: str):
-        video_path = None
-        if goal.is_our_goal and goal.scorer_surname:
-            video_path = _get_celebration_video_path(goal.scorer_surname.lower())
-
-        try:
-            if video_path:
-                try:
-                    await self.app.bot.send_video(
-                        chat_id=self.channel_id,
-                        video=open(video_path, "rb"),
-                        caption=message,
-                        parse_mode="HTML",
-                    )
-                except FileNotFoundError:
-                    await self.app.bot.send_message(
-                        chat_id=self.channel_id,
-                        text=message,
-                        parse_mode="HTML",
-                    )
-            else:
-                await self.app.bot.send_message(
-                    chat_id=self.channel_id,
-                    text=message,
-                    parse_mode="HTML",
-                )
-        except Exception as e:
-            logger.error(f"Site monitor {self.schedule_id}: error posting to channel — {e}")
 
     # ------------------------------------------------------------------
     # Lifecycle

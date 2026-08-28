@@ -68,6 +68,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/set_game - Schedule a game time (controls VK stream monitoring window)\n"
         "/games - List scheduled games and delete them\n\n"
         "/match <url> - Parse match page and post goal commentary to channel\n\n"
+        "/start_translation [счёт] - Вести трансляцию вручную своими сообщениями\n"
+        "/end_translation - Завершить ручную трансляцию\n\n"
         "Examples:\n"
         "/monitor https://vk.com/video-123456789_456123789\n"
         "/match https://bauman_league.join.football/match/5580043"
@@ -298,7 +300,13 @@ async def game_time_input_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # 2. Pending game time input?
+    # NOTE: this must stay AHEAD of the manual translation check. "21:30" is a
+    # valid score pattern, so a game time being entered would otherwise be
+    # announced to the channel as a 21-30 scoreline.
     if GAME_DAY_PENDING_KEY not in context.user_data:
+        # 3. Manual translation running? Treat the message as a score report.
+        from handlers.manual_translation import handle_translation_message
+        await handle_translation_message(update, context)
         return
     if not update.message or not update.message.text:
         return
@@ -407,10 +415,14 @@ async def _post_goals_to_channel(
     channel_id: str,
     user_id: int,
 ) -> List[str]:
-    """Generate commentary for each goal and post it to the channel.
+    """Post commentary for each goal on a match page.
 
-    Returns the list of posted message texts (for GPT history).
+    Uses a private ScoreTracker rather than the shared channel one: /match
+    replays a whole match on demand, so it must not be silenced by goals the
+    live monitors already announced, nor overwrite their running score.
     """
+    from services.goal_announcer import GoalAnnouncer, ScoreTracker
+
     config = Config()
     gpt_service = None
     if config.is_openai_configured:
@@ -425,64 +437,28 @@ async def _post_goals_to_channel(
         except Exception:
             pass
 
-    message_history: list[str] = []
+    announcer = GoalAnnouncer(
+        app, channel_id, user_id=user_id, gpt_service=gpt_service, tracker=ScoreTracker(),
+    )
 
+    posted: List[str] = []
     for goal in goals:
-        score_normalized = goal.score.replace(" ", "").replace(":", "-")
+        numbers = re.findall(r"\d+", goal.score or "")
+        if len(numbers) < 2:
+            logger.warning(f"Skipping goal with unparseable score {goal.score!r}")
+            continue
 
-        # Generate message
-        if gpt_service and gpt_service.is_available():
-            gpt_msg = await gpt_service.generate_commentary(
-                message_history,
-                score_normalized,
-                is_our_goal=goal.is_our_goal,
-                scorer_surname=goal.scorer_surname,
-            )
-            if gpt_msg:
-                message = gpt_msg
-            elif goal.is_our_goal:
-                message = f"⚽ Забиваем! Гол забил {goal.scorer_name}. Счет: {score_normalized}"
-            else:
-                message = f"Пропускаем. Счет: {score_normalized}"
-        elif goal.is_our_goal:
-            message = f"⚽ Забиваем! Гол забил {goal.scorer_name}. Счет: {score_normalized}"
-        else:
-            message = f"Пропускаем. Счет: {score_normalized}"
-
-        # Celebration video
-        video_path = None
-        if goal.is_our_goal and goal.scorer_surname:
-            from monitors.translation_monitor import VKTranslationMonitor as _TM
-            video_path = _TM._get_celebration_video_path(None, goal.scorer_surname.lower())
-
-        # Post
-        try:
-            if video_path:
-                try:
-                    await app.bot.send_video(
-                        chat_id=channel_id,
-                        video=open(video_path, "rb"),
-                        caption=message,
-                        parse_mode="HTML",
-                    )
-                except FileNotFoundError:
-                    await app.bot.send_message(
-                        chat_id=channel_id, text=message, parse_mode="HTML",
-                    )
-            else:
-                await app.bot.send_message(
-                    chat_id=channel_id, text=message, parse_mode="HTML",
-                )
-        except Exception as e:
-            logger.error(f"Error posting goal to channel: {e}")
-
-        message_history.append(message)
-        if len(message_history) > 10:
-            message_history = message_history[-10:]
-
+        message = await announcer.announce(
+            int(numbers[0]),
+            int(numbers[1]),
+            scorer_name=goal.scorer_name,
+            scorer_surname=goal.scorer_surname,
+        )
+        if message:
+            posted.append(message)
         await asyncio.sleep(2)
 
-    return message_history
+    return posted
 
 
 # ===================================================================
@@ -640,7 +616,7 @@ async def group_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🔍 Group ID: {config.VK_GROUP}\n"
             f"📈 Status: {status}\n"
             f"📺 Streams found: {streams_count}\n"
-            f"⏱ Check interval: 15 seconds"
+            f"⏱ Check interval: 30 seconds"
         )
     else:
         message = "❌ VK group monitoring is not active"

@@ -63,7 +63,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  lint:
+  lint-and-test:
     runs-on: ubuntu-latest
     
     steps:
@@ -79,11 +79,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install flake8
+          pip install -r requirements.txt
 
       - name: Lint with flake8
         run: |
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Run tests
+        run: pytest -q
 
   deploy:
     runs-on: ubuntu-latest
@@ -125,13 +129,18 @@ jobs:
           MY_ID: ${{ secrets.MY_ID }}
           VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
           VK_GROUP: ${{ secrets.VK_GROUP }}
+          VK_APP_ID: ${{ secrets.VK_APP_ID }}
           OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+          MATCH_PAGE_TEAM_NAME: ${{ secrets.MATCH_PAGE_TEAM_NAME }}
         run: |
           # Create project directory if it doesn't exist
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "mkdir -p ${{ secrets.SERVER_PATH }}"
           
-          # Copy files to server
-          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -r * ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }}/
+          # Copy files to server (exclude local secret/state files)
+          rsync -az --delete-excluded \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
+            --exclude '.git' --exclude 'env' --exclude '.env' --exclude 'data' --exclude 'logs' \
+            ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }}/
           
           # Build and run Docker container on server
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << EOF
@@ -153,7 +162,10 @@ jobs:
               -e MY_ID="$MY_ID" \
               -e VK_ACCESS_TOKEN="$VK_ACCESS_TOKEN" \
               -e VK_GROUP="$VK_GROUP" \
+              -e VK_APP_ID="$VK_APP_ID" \
               -e OPENAI_KEY="$OPENAI_KEY" \
+              -e MATCH_PAGE_TEAM_NAME="$MATCH_PAGE_TEAM_NAME" \
+              -v ${{ secrets.SERVER_PATH }}/data:/app/data \
               -v ${{ secrets.SERVER_PATH }}/logs:/app/logs \
               vk-translation-bot:latest
           EOF

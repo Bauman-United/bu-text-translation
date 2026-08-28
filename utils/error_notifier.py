@@ -6,7 +6,7 @@ when API errors occur.
 """
 
 import logging
-from typing import Optional, Callable, Awaitable
+from typing import Optional
 from telegram.ext import Application
 
 logger = logging.getLogger(__name__)

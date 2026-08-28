@@ -7,14 +7,15 @@ for score comments and sends notifications to Telegram channels.
 
 import asyncio
 import logging
-from datetime import datetime
-from typing import Set, Optional, Tuple, List
+from typing import Set
 
 from telegram.ext import Application
 
+from api.vk_auth import VKAuthError
 from api.vk_client import VKClient
-from utils.url_parser import parse_video_url, parse_score_comment, is_score_comment
+from utils.url_parser import parse_video_url, parse_score_comment
 from config.settings import Config
+from services.goal_announcer import GoalAnnouncer, get_channel_tracker
 from services.gpt_service import GPTCommentaryService
 from utils.error_notifier import send_error_notification
 
@@ -40,8 +41,6 @@ class VKTranslationMonitor:
         self.user_id = user_id
         self.seen_comments: Set[int] = set()
         self.is_active = True
-        self.current_score = (0, 0)  # (our_score, opponent_score)
-        self.message_history: List[str] = []  # Store previous score change messages
         
         # Initialize GPT service if available
         self.gpt_service = None
@@ -65,7 +64,19 @@ class VKTranslationMonitor:
             await send_error_notification(self.app, self.user_id, service_name, request_info, error_code, error_message)
         
         self.vk_client = VKClient(config.VK_ACCESS_TOKEN, error_notifier=vk_error_notifier)
-    
+
+        # Score, history, dedup and posting all live in the shared announcer, so
+        # a goal already reported by the site monitor or the manual translation
+        # is not posted a second time here.
+        self.announcer = GoalAnnouncer(
+            app, channel_id, user_id=user_id, gpt_service=self.gpt_service
+        )
+
+    @property
+    def current_score(self):
+        """Running score, owned by the tracker shared across all sources."""
+        return get_channel_tracker(self.channel_id).score
+
     async def check_comments(self) -> bool:
         """
         Check for new comments on the translation.
@@ -91,7 +102,12 @@ class VKTranslationMonitor:
                 await self.send_comment_to_channel(comment)
             
             return True
-            
+
+        except VKAuthError as e:
+            # Authorization is dead — polling on would spam the owner every 30s
+            # and cannot succeed until someone re-runs scripts/vk_authorize.py.
+            logger.error(f"Stopping monitoring for {self.translation_url}: VK auth failed — {e}")
+            return False
         except Exception as e:
             # VK: sometimes the stream video can't be accessed anymore / doesn't exist
             # (e.g. "Access denied: video not found", code=15). In this case, keep polling
@@ -109,147 +125,22 @@ class VKTranslationMonitor:
             return True
     
     async def send_comment_to_channel(self, comment: dict):
-        """Send a comment to the Telegram channel only if it contains score information."""
+        """Announce a comment to the channel when it reports a new score."""
         try:
-            # Get user information
-            text = comment.get('text', '')
-            
-            # Check if comment contains score information
-            if not is_score_comment(text):
-                logger.debug(f"Skipping comment (not a score): {text}")
-                return
-            
-            # Parse the score
-            score_data = parse_score_comment(text)
+            score_data = parse_score_comment(comment.get('text', ''))
             if not score_data:
+                logger.debug(f"Skipping comment (not a score): {comment.get('text', '')}")
                 return
-            
+
             our_score, opponent_score, surname = score_data
-            previous_our_score, previous_opponent_score = self.current_score
-            
-            # Check if our team scored (first number increased)
-            if our_score > previous_our_score:
-                # Generate commentary using GPT if available
-                if self.gpt_service and self.gpt_service.is_available():
-                    new_score_str = f"{our_score}-{opponent_score}"
-                    gpt_message = await self.gpt_service.generate_commentary(
-                        self.message_history, 
-                        new_score_str, 
-                        is_our_goal=True,
-                        scorer_surname=surname
-                    )
-                    if gpt_message:
-                        message = gpt_message
-                    else:
-                        # Fallback to default message if GPT fails
-                        message = f"⚽ Забиваем! Счет: {our_score}-{opponent_score}"
-                        if surname:
-                            surname_capitalized = surname.capitalize()
-                            message = f"⚽ Забиваем! Гол забил {surname_capitalized}. Счет: {our_score}-{opponent_score}"
-                else:
-                    # Use default message format
-                    message = f"⚽ Забиваем! Счет: {our_score}-{opponent_score}"
-                    if surname:
-                        surname_capitalized = surname.capitalize()
-                        message = f"⚽ Забиваем! Гол забил {surname_capitalized}. Счет: {our_score}-{opponent_score}"
-                
-                video_path = None
-                if surname:
-                    # Check surname in lowercase for video mapping
-                    surname_lower = surname.lower()
-                    # Determine which video to attach based on surname
-                    video_path = self._get_celebration_video_path(surname_lower)
-                
-                # Send message with or without video
-                if video_path:
-                    try:
-                        await self.app.bot.send_video(
-                            chat_id=self.channel_id,
-                            video=open(video_path, 'rb'),
-                            caption=message,
-                            parse_mode='HTML'
-                        )
-                    except FileNotFoundError:
-                        # Fallback to text message if video not found
-                        await self.app.bot.send_message(
-                            chat_id=self.channel_id,
-                            text=message,
-                            parse_mode='HTML'
-                        )
-                else:
-                    await self.app.bot.send_message(
-                        chat_id=self.channel_id,
-                        text=message,
-                        parse_mode='HTML'
-                    )
-            # Check if opponent scored (second number increased)
-            elif opponent_score > previous_opponent_score:
-                # Generate commentary using GPT if available
-                if self.gpt_service and self.gpt_service.is_available():
-                    new_score_str = f"{our_score}-{opponent_score}"
-                    gpt_message = await self.gpt_service.generate_commentary(
-                        self.message_history, 
-                        new_score_str, 
-                        is_our_goal=False,
-                        scorer_surname=None
-                    )
-                    if gpt_message:
-                        message = gpt_message
-                    else:
-                        # Fallback to default message if GPT fails
-                        message = f"Пропускаем. Счет: {our_score}-{opponent_score}"
-                else:
-                    # Use default message format
-                    message = f"Пропускаем. Счет: {our_score}-{opponent_score}"
-                
-                await self.app.bot.send_message(
-                    chat_id=self.channel_id,
-                    text=message,
-                    parse_mode='HTML'
-                )
-            else:
-                # Score didn't change, skip this comment
-                logger.debug(f"Score didn't change: {text}")
-                return
-            
-            # Update current score
-            self.current_score = (our_score, opponent_score)
-            
-            # Store message in history for future GPT context
-            self.message_history.append(message)
-            
-            # Keep only last 10 messages to avoid context overflow
-            if len(self.message_history) > 10:
-                self.message_history = self.message_history[-10:]
-            
-            logger.info(f"Posted score update: {message}")
-            
+            await self.announcer.announce(
+                our_score,
+                opponent_score,
+                scorer_surname=surname or None,
+            )
         except Exception as e:
             logger.error(f"Error sending comment to channel: {e}")
-    
-    def _get_celebration_video_path(self, surname_lower: str) -> Optional[str]:
-        """
-        Get celebration video path based on surname.
-        
-        Args:
-            surname_lower: Surname in lowercase
-            
-        Returns:
-            Path to celebration video or None
-        """
-        if surname_lower in ["богомолов", "багич"]:
-            return "celebrations/богомолов.mp4"
-        elif surname_lower == "заночуев":
-            return "celebrations/заночуев.mp4"
-        elif surname_lower in ["панфер", "панфёр", "панферов", "панфёров"]:
-            return "celebrations/панферов.mp4"
-        elif surname_lower in ["писарь", "писарев"]:
-            return "celebrations/писарев.mp4"
-        elif surname_lower in ["шева", "шевченко"]:
-            return "celebrations/шевченко.mp4"
-        else:
-            return "celebrations/другие.mp4"
-    
+
     async def send_message(self, text: str):
         """Send a message to the Telegram channel."""
         try:
@@ -297,32 +188,31 @@ class VKTranslationMonitor:
                 logger.info("No existing comments found")
                 return
             
-            # Process comments in reverse order (oldest first) to track score progression correctly
-            # Comments from VK API are typically in reverse chronological order (newest first)
-            comments_reversed = list(reversed(comments))
-            
+            # get_video_comments() already returns comments oldest-first, which is
+            # what tracking score progression needs — do not reorder them here.
+            tracker = get_channel_tracker(self.channel_id)
             score_comments_processed = 0
-            for comment in comments_reversed:
+            for comment in comments:
                 comment_id = comment['id']
                 self.seen_comments.add(comment_id)
                 
                 # Process score comments to update current score (but don't send notifications)
-                text = comment.get('text', '')
-                if is_score_comment(text):
-                    score_data = parse_score_comment(text)
-                    if score_data:
-                        our_score, opponent_score, surname = score_data
-                        # Update current score to track the latest score from existing comments
-                        # We only update if this score is higher (more recent)
-                        if our_score > self.current_score[0] or opponent_score > self.current_score[1]:
-                            self.current_score = (our_score, opponent_score)
-                            score_comments_processed += 1
-                            logger.debug(f"Updated score from existing comment: {our_score}-{opponent_score}")
+                score_data = parse_score_comment(comment.get('text', ''))
+                if score_data:
+                    our_score, opponent_score, _ = score_data
+                    # Advance the tracker without announcing: these goals already
+                    # happened before monitoring started.
+                    if tracker.register(our_score, opponent_score):
+                        score_comments_processed += 1
+                        logger.debug(f"Seeded score from existing comment: {our_score}-{opponent_score}")
             
             logger.info(f"Processed {len(comments)} existing comments ({score_comments_processed} score comments)")
             if self.current_score != (0, 0):
                 logger.info(f"Current score initialized from existing comments: {self.current_score[0]}-{self.current_score[1]}")
             
+        except VKAuthError:
+            # Let start_monitoring's loop hit the same error and stop cleanly.
+            logger.error("Could not process existing comments: VK auth failed")
         except Exception as e:
             logger.error(f"Error processing existing comments: {e}")
     

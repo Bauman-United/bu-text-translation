@@ -30,6 +30,11 @@ from handlers.telegram_commands import (
     set_group_stream_monitor,
     start_pending_site_monitors,
 )
+from handlers.manual_translation import (
+    end_translation_command,
+    restore_session,
+    start_translation_command,
+)
 from monitors.group_stream_monitor import VKGroupStreamMonitor
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,8 @@ def main():
         application.add_handler(CommandHandler("set_game", set_game_command))
         application.add_handler(CommandHandler("games", games_command))
         application.add_handler(CommandHandler("match", match_command))
+        application.add_handler(CommandHandler("start_translation", start_translation_command))
+        application.add_handler(CommandHandler("end_translation", end_translation_command))
         
         # Callback query handlers
         application.add_handler(CallbackQueryHandler(remove_translation_callback, pattern="^remove:"))
@@ -86,6 +93,8 @@ def main():
                 BotCommand("set_game", "Schedule a game time (VK monitoring window)"),
                 BotCommand("games", "List scheduled games and delete them"),
                 BotCommand("match", "Parse match page and post goal commentary"),
+                BotCommand("start_translation", "Start manual translation from your messages"),
+                BotCommand("end_translation", "Stop manual translation"),
             ]
             try:
                 await application.bot.set_my_commands(commands)
@@ -109,6 +118,12 @@ def main():
                     logger.error(f"Error starting group stream monitoring: {e}")
             else:
                 logger.warning("VK_GROUP not configured, group stream monitoring disabled")
+
+            # Restore a manual translation that was running before a restart
+            try:
+                restore_session(application)
+            except Exception as e:
+                logger.error(f"Error restoring manual translation: {e}")
 
             # Resume site monitors for existing site-mode schedules
             try:

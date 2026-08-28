@@ -62,10 +62,17 @@ A sophisticated Telegram bot that monitors VK (VKontakte) live streams and autom
      ```
      TELEGRAM_BOT_TOKEN=your_bot_token
      TELEGRAM_CHANNEL_ID=your_channel_id
-     VK_ACCESS_TOKEN=your_vk_token
+     VK_APP_ID=your_vk_app_id
      VK_GROUP=your_vk_group_id_or_url
      MY_ID=your_telegram_user_id
      ```
+
+5. **Authorize with VK (once):**
+   ```bash
+   python scripts/vk_authorize.py
+   ```
+   Open the printed link, approve it, paste the redirect URL back. The bot stores
+   a refreshable token in `data/vk_token.json` and renews it on its own after that.
 
 ## Configuration
 
@@ -85,16 +92,29 @@ A sophisticated Telegram bot that monitors VK (VKontakte) live streams and autom
 5. Copy the channel ID and add it to `.env` as `TELEGRAM_CHANNEL_ID`
 6. Remove @RawDataBot from the channel
 
-### 3. Get VK Access Token (Optional but Recommended)
+### 3. Set Up VK Access (Required)
 
-1. Go to [VK Token Generator](https://vkhost.github.io/)
-2. Select the following permissions:
-   - `video` - to access video information
-   - `offline` - for permanent access
-3. Log in with your VK account
-4. Copy the access token and add it to `.env` as `VK_ACCESS_TOKEN`
+VK ID removed the `offline` permission, so tokens from the old implicit flow now
+expire after 24 hours. The bot uses the refresh-token flow instead: you authorize
+once, and it renews access on its own.
 
-**Note:** Without a VK access token, you may have limited access to some videos, especially private ones.
+1. **Create your own VK application** at [vk.com/apps?act=manage](https://vk.com/apps?act=manage).
+   Under *Settings -> Placement*, set **State for users** to *Enabled* (a disabled
+   app answers OAuth with `application is blocked`). Fill in any URL if the console
+   demands one — it is never opened.
+2. Copy the **application ID** into `.env` as `VK_APP_ID`.
+3. Run `python scripts/vk_authorize.py` and follow the two steps it prints.
+
+The scopes requested are `video` (read stream comments) and `wall` (discover
+streams on the group wall). `offline` no longer exists and will be rejected as
+`invalid scope` if you add it.
+
+**Community and service tokens do not work here:** `wall.get` and
+`video.getComments` both reject group authorization with error 27.
+
+**Keep `data/vk_token.json`.** It holds the rotating refresh token — if it is lost,
+re-run `scripts/vk_authorize.py`. This is why `./data` must be a mounted volume
+in Docker.
 
 ### 4. Get VK Group ID (for automatic stream discovery)
 
@@ -276,6 +296,28 @@ bu-text-translation/
 This project is provided as-is for personal use.
 
 ## Bot Commands Reference
+
+### 🎙 Manual Translation
+
+When there is no VK stream and no match page to parse, you can narrate the match
+yourself:
+
+- `/start_translation` — the bot starts reading your plain-text messages.
+  A message like `2-1 Шевченко` becomes a channel post with GPT commentary and a
+  celebration clip, exactly as a VK comment would. Anything that is not a score
+  is ignored.
+- `/start_translation 3-2` — same, but joining a match already in progress: the
+  bot takes 3-2 as the current score and only announces what comes after it.
+- `/end_translation` — stop, and report the final score.
+
+Only the owner (`MY_ID`) can use these — the bot posts to a public channel.
+
+The manual mode runs alongside the VK and site monitors. All three share one
+score tracker per channel, so whichever source reports a goal first posts it and
+the others stay quiet rather than double-posting.
+
+The running score is stored in `data/manual_translation.json`, so a restart in
+the middle of a match does not reset it.
 
 ### 📋 Available Commands
 
