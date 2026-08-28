@@ -137,7 +137,9 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "mkdir -p ${{ secrets.SERVER_PATH }}"
           
           # Copy files to server (exclude local secret/state files)
-          rsync -az --delete-excluded \
+          # NB: --delete (not --delete-excluded): excluded paths must survive on
+          # the server. --no-owner/--no-group keeps the runner's uid off the files.
+          rsync -rlptz --delete --no-owner --no-group \
             -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
             --exclude '.git' --exclude 'env' --exclude '.env' --exclude 'data' --exclude 'logs' \
             ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }}/
@@ -145,7 +147,13 @@ jobs:
           # Build and run Docker container on server
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << EOF
             cd ${{ secrets.SERVER_PATH }}
-            
+
+            # State dirs must be writable by the container's non-root user (uid 1000).
+            # Docker creates a missing bind-mount source as root:root, which the
+            # container then cannot write to.
+            mkdir -p ${{ secrets.SERVER_PATH }}/data ${{ secrets.SERVER_PATH }}/logs
+            chown -R 1000:1000 ${{ secrets.SERVER_PATH }}/data ${{ secrets.SERVER_PATH }}/logs
+
             # Stop and remove old container if exists
             docker stop vk-translation-bot || true
             docker rm vk-translation-bot || true

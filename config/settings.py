@@ -34,11 +34,13 @@ class Config:
         # OpenAI Configuration
         self.OPENAI_KEY = os.getenv('OPENAI_KEY')
         
+        # Logging first: _validate_config() emits warnings, and a module-level
+        # logging.warning() installs its own root handler at WARNING level,
+        # after which basicConfig() is a no-op and every INFO line disappears.
+        self._setup_logging()
+
         # Validate required configuration
         self._validate_config()
-        
-        # Setup logging
-        self._setup_logging()
     
     def _validate_config(self):
         """Validate that all required configuration is present."""
@@ -63,7 +65,7 @@ class Config:
         if not load_tokens() and not self.VK_ACCESS_TOKEN:
             logging.warning(
                 "No VK tokens available (neither data/vk_token.json nor VK_ACCESS_TOKEN). "
-                "Run scripts/vk_authorize.py — VK monitoring is disabled until then."
+                "Send the bot /set_vk_token — VK monitoring is disabled until then."
             )
 
         if not self.VK_APP_ID:
