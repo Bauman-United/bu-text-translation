@@ -83,6 +83,9 @@ class Config:
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             level=logging.INFO
         )
+        # httpx logs the full request URL, which for Telegram embeds the bot
+        # token in every single line. Keep credentials out of the log file.
+        logging.getLogger('httpx').setLevel(logging.WARNING)
         self.logger = logging.getLogger(__name__)
     
     @property

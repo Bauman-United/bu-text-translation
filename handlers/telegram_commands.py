@@ -70,6 +70,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/match <url> - Parse match page and post goal commentary to channel\n\n"
         "/start_translation [счёт] - Вести трансляцию вручную своими сообщениями\n"
         "/end_translation - Завершить ручную трансляцию\n\n"
+        "/set_vk_token - Обновить токен VK (бот пришлёт ссылку)\n\n"
         "Examples:\n"
         "/monitor https://vk.com/video-123456789_456123789\n"
         "/match https://bauman_league.join.football/match/5580043"

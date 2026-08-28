@@ -13,15 +13,23 @@ This module holds the pure HTTP/crypto pieces. Persistence lives in
 import base64
 import hashlib
 import logging
+import re
 import secrets
+from dataclasses import dataclass
 from typing import Dict, Optional
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 AUTHORIZE_URL = "https://id.vk.com/authorize"
+# The classic endpoint. VK ID's code+PKCE flow requires a redirect_uri
+# registered on the application, and a "mini app" has nowhere to register one —
+# every candidate comes back as "redirect_uri is missing or invalid". The
+# implicit flow below does not check registration, so it is what the
+# /set_vk_token command uses. Its tokens live 24h and cannot be refreshed.
+IMPLICIT_AUTHORIZE_URL = "https://oauth.vk.com/authorize"
 TOKEN_URL = "https://id.vk.com/oauth2/auth"
 DEFAULT_REDIRECT_URI = "https://oauth.vk.com/blank.html"
 
@@ -143,3 +151,93 @@ def refresh_access_token(
         "device_id": device_id,
         "state": state or generate_state(),
     })
+
+
+# ---------------------------------------------------------------------------
+# Implicit flow (used by the /set_vk_token command)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ImplicitToken:
+    """What VK hands back on the blank.html redirect."""
+
+    access_token: str
+    expires_in: Optional[int] = None
+    user_id: Optional[int] = None
+
+
+# vk1.a.<base64ish payload> — long enough that no ordinary text matches it.
+_TOKEN_RE = re.compile(r"^vk\d+\.[a-z]\.[A-Za-z0-9_\-]{20,}$")
+
+
+def build_implicit_authorize_url(
+    client_id: str,
+    scope: str = "video,wall",
+    redirect_uri: str = DEFAULT_REDIRECT_URI,
+) -> str:
+    """
+    Build the link a human opens to mint a fresh 24h token.
+
+    Scope is comma-separated here: the classic endpoint rejects the
+    space-separated OAuth 2.1 form.
+    """
+    params = {
+        "response_type": "token",
+        "client_id": str(client_id),
+        "scope": scope,
+        "redirect_uri": redirect_uri,
+        "display": "page",
+        "v": "5.199",
+    }
+    return f"{IMPLICIT_AUTHORIZE_URL}?{urlencode(params)}"
+
+
+def parse_implicit_redirect(pasted: str) -> ImplicitToken:
+    """
+    Read whatever the user pasted back: the whole redirect URL or a bare token.
+
+    Args:
+        pasted: Redirect URL from the address bar, or just the access token
+
+    Returns:
+        ImplicitToken with the token and, when the URL carried them, its lifetime.
+
+    Raises:
+        ValueError: nothing usable in the input, or VK reported a refusal.
+    """
+    text = (pasted or "").strip()
+    if not text:
+        raise ValueError("Пустой ввод")
+
+    if not text.startswith("http"):
+        if _TOKEN_RE.match(text):
+            return ImplicitToken(access_token=text)
+        raise ValueError("Это не похоже ни на токен, ни на адрес редиректа")
+
+    parsed = urlparse(text)
+    params: Dict[str, str] = {}
+    for part in (parsed.fragment, parsed.query):
+        for key, value in parse_qs(part).items():
+            if value:
+                params.setdefault(key, value[0])
+
+    if "error" in params:
+        raise ValueError(
+            f"VK отказал: {params['error']} — {params.get('error_description', 'без пояснения')}"
+        )
+
+    token = params.get("access_token")
+    if not token:
+        raise ValueError("В адресе нет access_token")
+
+    def _as_int(name):
+        try:
+            return int(params[name])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    return ImplicitToken(
+        access_token=token,
+        expires_in=_as_int("expires_in"),
+        user_id=_as_int("user_id"),
+    )

@@ -49,6 +49,9 @@ class VKGroupStreamMonitor:
         # Track last seen wall post id to only process new posts
         self.last_wall_post_id: Optional[int] = None
         self.is_active = True
+        # Polling task handle, so a stopped poller can be brought back after the
+        # token is replaced instead of requiring a container restart.
+        self._polling_task: Optional[asyncio.Task] = None
         # Track parse_mode per schedule to detect changes
         self._last_known_modes: dict[str, str] = {}
         
@@ -416,6 +419,19 @@ class VKGroupStreamMonitor:
         except Exception as e:
             logger.error(f"Error sending channel message: {e}")
     
+    def ensure_polling(self) -> bool:
+        """
+        Start the polling loop unless it is already running.
+
+        Returns:
+            True if a new polling task was created.
+        """
+        if self._polling_task is not None and not self._polling_task.done():
+            return False
+        self._polling_task = asyncio.create_task(self.start_polling())
+        logger.info("VK group stream polling task started")
+        return True
+
     async def start_polling(self):
         """Start polling for new streams every 30 seconds."""
         logger.info(f"Starting VK group stream monitoring for group {self.group_id}")

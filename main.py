@@ -35,6 +35,8 @@ from handlers.manual_translation import (
     restore_session,
     start_translation_command,
 )
+from handlers.vk_token_commands import set_vk_token_command
+from services.token_watchdog import run_token_watchdog
 from monitors.group_stream_monitor import VKGroupStreamMonitor
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,7 @@ def main():
         application.add_handler(CommandHandler("match", match_command))
         application.add_handler(CommandHandler("start_translation", start_translation_command))
         application.add_handler(CommandHandler("end_translation", end_translation_command))
+        application.add_handler(CommandHandler("set_vk_token", set_vk_token_command))
         
         # Callback query handlers
         application.add_handler(CallbackQueryHandler(remove_translation_callback, pattern="^remove:"))
@@ -95,6 +98,7 @@ def main():
                 BotCommand("match", "Parse match page and post goal commentary"),
                 BotCommand("start_translation", "Start manual translation from your messages"),
                 BotCommand("end_translation", "Stop manual translation"),
+                BotCommand("set_vk_token", "Get the VK auth link / submit a new token"),
             ]
             try:
                 await application.bot.set_my_commands(commands)
@@ -112,12 +116,18 @@ def main():
                         int(config.MY_ID)
                     )
                     set_group_stream_monitor(gsm)
-                    asyncio.create_task(gsm.start_polling())
+                    gsm.ensure_polling()
                     logger.info(f"Started VK group stream monitoring for group {config.VK_GROUP}")
                 except Exception as e:
                     logger.error(f"Error starting group stream monitoring: {e}")
             else:
                 logger.warning("VK_GROUP not configured, group stream monitoring disabled")
+
+            # Warn about the VK token before a scheduled game needs it
+            try:
+                asyncio.create_task(run_token_watchdog(application, int(config.MY_ID)))
+            except Exception as e:
+                logger.error(f"Error starting token watchdog: {e}")
 
             # Restore a manual translation that was running before a restart
             try:

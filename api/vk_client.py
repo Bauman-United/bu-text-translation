@@ -135,10 +135,10 @@ class VKClient:
     """
     VK API client wrapper.
 
-    Authentication comes from `data/vk_token.json` when it exists (a refreshable
-    VK ID token set written by scripts/vk_authorize.py). A static VK_ACCESS_TOKEN
-    still works as a fallback, but VK ID caps those at 24 hours, so the stored
-    set is what keeps the bot running unattended.
+    Authentication comes from `data/vk_token.json` when it exists — written
+    either by the bot's /set_vk_token command (24h token, replaced by hand) or
+    by scripts/vk_authorize.py (refreshable, needs an app that can register a
+    redirect URI). A static VK_ACCESS_TOKEN still works as a fallback.
     """
 
     # Refresh is shared process-wide: several monitors run concurrently and must
@@ -175,8 +175,8 @@ class VKClient:
             )
         elif self._static_token:
             logger.warning(
-                "VK auth: using static VK_ACCESS_TOKEN — it cannot be refreshed and "
-                "VK ID expires these after 24h. Run scripts/vk_authorize.py."
+                "VK auth: using static VK_ACCESS_TOKEN — VK ID expires these after "
+                "24h. Send the bot /set_vk_token to manage the token instead."
             )
         else:
             logger.error("VK auth: no credentials at all — VK calls will fail")
@@ -251,19 +251,28 @@ class VKClient:
 
     async def _ensure_session(self) -> None:
         """Make sure `self.vk_api` is bound to a live, non-expired token."""
+        # Pick up a token set written after this client was built — /set_vk_token
+        # replaces the file, and without this the client would keep using a dead
+        # token (or the static fallback) until the process restarts.
+        if self._tokens is None or self._tokens.is_expired:
+            latest = load_tokens()
+            if latest and not latest.is_expired:
+                logger.info("VK auth: adopted token set from store")
+                self._tokens = latest
+
         if self._tokens and self._tokens.is_expired:
             logger.info("VK auth: stored access token expired or about to expire")
             if not await self._refresh_tokens():
                 message = (
-                    "VK access token expired and could not be refreshed. "
-                    "Run scripts/vk_authorize.py to re-authorize."
+                    "Токен VK истёк и не обновляется автоматически. "
+                    "Пришли боту /set_vk_token, чтобы получить ссылку и вставить новый."
                 )
                 await self._report_auth_failure("token refresh", message)
                 raise VKAuthError(message)
 
         token = self.access_token
         if not token or not token.strip():
-            message = "No VK access token available. Run scripts/vk_authorize.py."
+            message = "Токена VK нет. Пришли боту /set_vk_token."
             await self._report_auth_failure("token lookup", message)
             raise VKAuthError(message)
 
@@ -281,7 +290,7 @@ class VKClient:
                     "VK API",
                     request_info,
                     "auth",
-                    f"{message}\n\nЗапусти: python scripts/vk_authorize.py",
+                    message,
                 )
             except Exception as e:
                 logger.error(f"Failed to report VK auth failure: {e}", exc_info=True)

@@ -2,6 +2,13 @@
 """
 One-time VK ID authorization.
 
+Obtains a refreshable token set via the VK ID code+PKCE flow.
+
+REQUIRES an application that can register a redirect URI. VK "mini app" type
+apps cannot — every redirect_uri comes back as "redirect_uri is missing or
+invalid" — so with such an app use the bot's /set_vk_token command instead,
+which uses the classic implicit flow (24h tokens, replaced by hand).
+
 Run this once by hand. It prints a link, you approve it in the browser, paste
 the redirect URL back, and the bot gets a refresh token it can renew on its own
 from then on.

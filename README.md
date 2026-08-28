@@ -94,27 +94,36 @@ A sophisticated Telegram bot that monitors VK (VKontakte) live streams and autom
 
 ### 3. Set Up VK Access (Required)
 
-VK ID removed the `offline` permission, so tokens from the old implicit flow now
-expire after 24 hours. The bot uses the refresh-token flow instead: you authorize
-once, and it renews access on its own.
-
 1. **Create your own VK application** at [vk.com/apps?act=manage](https://vk.com/apps?act=manage).
-   Under *Settings -> Placement*, set **State for users** to *Enabled* (a disabled
-   app answers OAuth with `application is blocked`). Fill in any URL if the console
-   demands one — it is never opened.
+   Under *Settings -> Placement*, set **State for users** to *Enabled* — a disabled
+   app answers OAuth with `application is blocked`. Fill in any URL if the console
+   demands one; it is never opened.
 2. Copy the **application ID** into `.env` as `VK_APP_ID`.
-3. Run `python scripts/vk_authorize.py` and follow the two steps it prints.
+3. Send the bot `/set_vk_token`. It replies with an authorization link; open it,
+   approve, and send the resulting address back as
+   `/set_vk_token <the address>`. The bot validates the token, stores it in
+   `data/vk_token.json` and picks it up without a restart.
 
-The scopes requested are `video` (read stream comments) and `wall` (discover
-streams on the group wall). `offline` no longer exists and will be rejected as
-`invalid scope` if you add it.
+Scopes are `video` (read stream comments) and `wall` (discover streams on the
+group wall).
+
+**The token lasts 24 hours and has to be replaced by hand.** VK ID removed the
+`offline` permission — requesting it fails with `invalid scope`. Its replacement,
+the code+PKCE flow with refresh tokens, needs a redirect URI registered on the
+application, and a "mini app" has nowhere to register one: every candidate is
+rejected with `redirect_uri is missing or invalid`. If you ever register an app
+type that does allow it, `scripts/vk_authorize.py` sets up automatic refresh and
+nothing else has to change — the token store already supports it.
+
+The bot checks hourly whether the stored token will survive until the next
+scheduled game and warns you in advance, so the token is never a surprise at
+kick-off.
 
 **Community and service tokens do not work here:** `wall.get` and
 `video.getComments` both reject group authorization with error 27.
 
-**Keep `data/vk_token.json`.** It holds the rotating refresh token — if it is lost,
-re-run `scripts/vk_authorize.py`. This is why `./data` must be a mounted volume
-in Docker.
+`./data` must be a mounted volume in Docker — it holds the token and the game
+schedules.
 
 ### 4. Get VK Group ID (for automatic stream discovery)
 
