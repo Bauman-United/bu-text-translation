@@ -67,12 +67,9 @@ A sophisticated Telegram bot that monitors VK (VKontakte) live streams and autom
      MY_ID=your_telegram_user_id
      ```
 
-5. **Authorize with VK (once):**
-   ```bash
-   python scripts/vk_authorize.py
-   ```
-   Open the printed link, approve it, paste the redirect URL back. The bot stores
-   a refreshable token in `data/vk_token.json` and renews it on its own after that.
+5. **Authorize with VK (once):** see [docs/VK_TOKEN.md](docs/VK_TOKEN.md) —
+   open the authorization link, approve, and send the redirect address to the
+   bot as `/set_vk_token <the address>`. The token lands in `data/vk_token.json`.
 
 ## Configuration
 
@@ -94,30 +91,21 @@ A sophisticated Telegram bot that monitors VK (VKontakte) live streams and autom
 
 ### 3. Set Up VK Access (Required)
 
-1. **Create your own VK application** at [vk.com/apps?act=manage](https://vk.com/apps?act=manage).
-   Under *Settings -> Placement*, set **State for users** to *Enabled* — a disabled
-   app answers OAuth with `application is blocked`. Fill in any URL if the console
-   demands one; it is never opened.
-2. Copy the **application ID** into `.env` as `VK_APP_ID`.
-3. Send the bot `/set_vk_token`. It replies with an authorization link; open it,
-   approve, and send the resulting address back as
-   `/set_vk_token <the address>`. The bot validates the token, stores it in
-   `data/vk_token.json` and picks it up without a restart.
+Follow **[docs/VK_TOKEN.md](docs/VK_TOKEN.md)** — the short version: authorize
+through an official standalone app (Kate Mobile) with the `offline` scope, copy
+the redirect address and send it to the bot as `/set_vk_token <the address>`.
+The token is permanent and not IP-bound; the bot validates it, stores it in
+`data/vk_token.json` and picks it up without a restart.
 
-Scopes are `video` (read stream comments) and `wall` (discover streams on the
-group wall).
+Scopes are `video` (read stream comments), `wall` (discover streams on the
+group wall) and `offline` (token never expires).
 
-**The token lasts 24 hours and has to be replaced by hand.** VK ID removed the
-`offline` permission — requesting it fails with `invalid scope`. Its replacement,
-the code+PKCE flow with refresh tokens, needs a redirect URI registered on the
-application, and a "mini app" has nowhere to register one: every candidate is
-rejected with `redirect_uri is missing or invalid`. If you ever register an app
-type that does allow it, `scripts/vk_authorize.py` sets up automatic refresh and
-nothing else has to change — the token store already supports it.
-
-The bot checks hourly whether the stored token will survive until the next
-scheduled game and warns you in advance, so the token is never a surprise at
-kick-off.
+The guide also covers the fallbacks: a self-registered VK ID app with a trusted
+redirect URL (`VK_REDIRECT_URI` in `.env` switches `/set_vk_token` to the
+code+PKCE flow with automatic refresh) and the implicit flow through the
+server's proxy. For tokens that do expire, the bot checks hourly whether the
+stored token will survive until the next scheduled game and warns you in
+advance, so the token is never a surprise at kick-off.
 
 **Community and service tokens do not work here:** `wall.get` and
 `video.getComments` both reject group authorization with error 27.
