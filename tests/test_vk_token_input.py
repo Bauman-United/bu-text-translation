@@ -2,7 +2,13 @@
 
 import pytest
 
-from api.vk_auth import build_implicit_authorize_url, parse_implicit_redirect
+from api.vk_auth import (
+    AuthCode,
+    build_authorize_url,
+    build_implicit_authorize_url,
+    parse_implicit_redirect,
+    parse_redirect,
+)
 
 # Real VK tokens are ~220 chars; the parser deliberately requires a long tail so
 # ordinary text pasted by mistake is not mistaken for a token.
@@ -53,10 +59,57 @@ def test_rejects_junk(junk):
 
 
 def test_authorize_url_uses_the_flow_that_actually_works():
-    """The VK ID code flow needs a registered redirect_uri this app cannot have,
-    so the token command must use the classic implicit endpoint."""
+    """Without a registered redirect_uri the token command falls back to the
+    classic implicit endpoint."""
     url = build_implicit_authorize_url("54546527")
     assert url.startswith("https://oauth.vk.com/authorize?")
     assert "response_type=token" in url
     assert "scope=video%2Cwall" in url or "scope=video,wall" in url
     assert "offline" not in url  # VK ID removed it; asking for it errors out
+
+
+# ---------------------------------------------------------------------------
+# Code+PKCE flow (used when VK_REDIRECT_URI is registered on the app)
+# ---------------------------------------------------------------------------
+
+CODE_REDIRECT = (
+    "https://example.com/vk?code=abc123def"
+    "&device_id=DEVICE42&state=" + "s" * 48 + "&type=code_v2"
+)
+
+
+def test_parses_a_code_flow_redirect():
+    r = parse_redirect(CODE_REDIRECT)
+    assert isinstance(r, AuthCode)
+    assert r.code == "abc123def"
+    assert r.device_id == "DEVICE42"
+    assert r.state == "s" * 48
+
+
+def test_token_redirect_wins_over_code_when_both_present():
+    """Should never happen, but the token is directly usable — prefer it."""
+    r = parse_redirect(f"https://example.com/vk?code=abc#access_token={TOKEN}")
+    assert not isinstance(r, AuthCode)
+    assert r.access_token == TOKEN
+
+
+def test_url_with_neither_token_nor_code_is_rejected():
+    with pytest.raises(ValueError, match="ни access_token, ни code"):
+        parse_redirect("https://example.com/vk?foo=bar")
+
+
+def test_parse_implicit_redirect_refuses_a_code_redirect():
+    """Callers that can only store a ready token must not get an AuthCode."""
+    with pytest.raises(ValueError):
+        parse_implicit_redirect(CODE_REDIRECT)
+
+
+def test_code_flow_authorize_url_carries_pkce():
+    url = build_authorize_url(
+        "54546527", "CHALLENGE", "s" * 48, redirect_uri="https://example.com/vk"
+    )
+    assert url.startswith("https://id.vk.com/authorize?")
+    assert "response_type=code" in url
+    assert "code_challenge=CHALLENGE" in url
+    assert "code_challenge_method=S256" in url
+    assert "redirect_uri=https%3A%2F%2Fexample.com%2Fvk" in url

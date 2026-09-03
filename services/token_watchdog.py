@@ -1,10 +1,12 @@
 """
 Warn about the VK token before it matters.
 
-The token cannot be refreshed automatically (see api/vk_auth), so it has to be
-replaced by hand roughly once a day. Finding that out five minutes before
-kick-off is the failure mode worth avoiding, so this checks periodically and
-nags only when a scheduled game would actually be affected.
+An implicit-flow token cannot be refreshed automatically (see api/vk_auth), so
+it has to be replaced by hand roughly once a day. Finding that out five minutes
+before kick-off is the failure mode worth avoiding, so this checks periodically
+and nags only when a scheduled game would actually be affected. A code-flow
+token set carries a refresh token and renews itself, so it is never nagged
+about — only its complete absence is.
 """
 
 import asyncio
@@ -90,6 +92,12 @@ def evaluate_token(
                 "Пришли /set_vk_token, чтобы получить ссылку."
             ),
         )
+
+    if tokens.can_refresh:
+        # The refresh chain renews the access token on its own; expiry-based
+        # warnings would be noise. A broken refresh surfaces through the
+        # client's auth-failure notification instead.
+        return _OK
 
     if tokens.expires_at and tokens.is_expired:
         return TokenWarning(

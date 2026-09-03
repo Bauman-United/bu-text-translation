@@ -59,15 +59,17 @@ def main() -> int:
         print("   Это ID приложения из vk.com/apps?act=manage → Настройки")
         return 1
 
+    redirect_uri = os.getenv("VK_REDIRECT_URI") or DEFAULT_REDIRECT_URI
+
     verifier, challenge = generate_pkce_pair()
     state = generate_state()
-    url = build_authorize_url(app_id, challenge, state)
+    url = build_authorize_url(app_id, challenge, state, redirect_uri=redirect_uri)
 
     print("=" * 78)
     print("ШАГ 1. Открой эту ссылку в браузере и нажми «Разрешить»:\n")
     print(url)
     print()
-    print("ШАГ 2. Тебя перекинет на пустую страницу blank.html.")
+    print("ШАГ 2. Тебя перекинет на страницу редиректа (может быть пустой).")
     print("       Скопируй ВЕСЬ адрес из адресной строки и вставь сюда.")
     print("=" * 78)
     print()
@@ -104,7 +106,7 @@ def main() -> int:
             code_verifier=verifier,
             device_id=device_id,
             state=state,
-            redirect_uri=DEFAULT_REDIRECT_URI,
+            redirect_uri=redirect_uri,
         )
     except VKAuthError as e:
         print(f"❌ {e}")

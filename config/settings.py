@@ -29,6 +29,11 @@ class Config:
         # token set in data/vk_token.json (see scripts/vk_authorize.py).
         self.VK_ACCESS_TOKEN = os.getenv('VK_ACCESS_TOKEN')
         self.VK_APP_ID = os.getenv('VK_APP_ID')
+        # Trusted redirect URL registered on the VK ID application. When set,
+        # /set_vk_token uses the code+PKCE flow: tokens are not IP-bound and
+        # come with a refresh token, so the bot renews them itself. Without it
+        # the command falls back to the implicit flow (24h, IP-bound tokens).
+        self.VK_REDIRECT_URI = os.getenv('VK_REDIRECT_URI')
         self.VK_GROUP = os.getenv('VK_GROUP')
         
         # OpenAI Configuration

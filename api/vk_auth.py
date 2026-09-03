@@ -25,10 +25,9 @@ logger = logging.getLogger(__name__)
 
 AUTHORIZE_URL = "https://id.vk.com/authorize"
 # The classic endpoint. VK ID's code+PKCE flow requires a redirect_uri
-# registered on the application, and a "mini app" has nowhere to register one —
-# every candidate comes back as "redirect_uri is missing or invalid". The
-# implicit flow below does not check registration, so it is what the
-# /set_vk_token command uses. Its tokens live 24h and cannot be refreshed.
+# registered on the application, so /set_vk_token uses it only when
+# VK_REDIRECT_URI is configured. Without one it falls back to the implicit
+# flow below, whose tokens are IP-bound, live 24h and cannot be refreshed.
 IMPLICIT_AUTHORIZE_URL = "https://oauth.vk.com/authorize"
 TOKEN_URL = "https://id.vk.com/oauth2/auth"
 DEFAULT_REDIRECT_URI = "https://oauth.vk.com/blank.html"
@@ -154,7 +153,7 @@ def refresh_access_token(
 
 
 # ---------------------------------------------------------------------------
-# Implicit flow (used by the /set_vk_token command)
+# Redirect parsing for the /set_vk_token command
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -164,6 +163,15 @@ class ImplicitToken:
     access_token: str
     expires_in: Optional[int] = None
     user_id: Optional[int] = None
+
+
+@dataclass
+class AuthCode:
+    """What VK ID hands back on a code-flow redirect."""
+
+    code: str
+    device_id: Optional[str] = None
+    state: Optional[str] = None
 
 
 # vk1.a.<base64ish payload> — long enough that no ordinary text matches it.
@@ -192,15 +200,29 @@ def build_implicit_authorize_url(
     return f"{IMPLICIT_AUTHORIZE_URL}?{urlencode(params)}"
 
 
-def parse_implicit_redirect(pasted: str) -> ImplicitToken:
+def _redirect_params(text: str) -> Dict[str, str]:
+    """Collect params from both the fragment and the query of a redirect URL."""
+    parsed = urlparse(text)
+    params: Dict[str, str] = {}
+    for part in (parsed.fragment, parsed.query):
+        for key, value in parse_qs(part).items():
+            if value:
+                params.setdefault(key, value[0])
+    return params
+
+
+def parse_redirect(pasted: str):
     """
-    Read whatever the user pasted back: the whole redirect URL or a bare token.
+    Read whatever the user pasted back after authorizing in the browser.
+
+    Handles both flows: an implicit-flow redirect (or a bare token) and a VK ID
+    code-flow redirect carrying `code` + `device_id`.
 
     Args:
         pasted: Redirect URL from the address bar, or just the access token
 
     Returns:
-        ImplicitToken with the token and, when the URL carried them, its lifetime.
+        ImplicitToken or AuthCode, depending on what the URL carried.
 
     Raises:
         ValueError: nothing usable in the input, or VK reported a refusal.
@@ -214,21 +236,12 @@ def parse_implicit_redirect(pasted: str) -> ImplicitToken:
             return ImplicitToken(access_token=text)
         raise ValueError("Это не похоже ни на токен, ни на адрес редиректа")
 
-    parsed = urlparse(text)
-    params: Dict[str, str] = {}
-    for part in (parsed.fragment, parsed.query):
-        for key, value in parse_qs(part).items():
-            if value:
-                params.setdefault(key, value[0])
+    params = _redirect_params(text)
 
     if "error" in params:
         raise ValueError(
             f"VK отказал: {params['error']} — {params.get('error_description', 'без пояснения')}"
         )
-
-    token = params.get("access_token")
-    if not token:
-        raise ValueError("В адресе нет access_token")
 
     def _as_int(name):
         try:
@@ -236,8 +249,28 @@ def parse_implicit_redirect(pasted: str) -> ImplicitToken:
         except (KeyError, TypeError, ValueError):
             return None
 
-    return ImplicitToken(
-        access_token=token,
-        expires_in=_as_int("expires_in"),
-        user_id=_as_int("user_id"),
-    )
+    token = params.get("access_token")
+    if token:
+        return ImplicitToken(
+            access_token=token,
+            expires_in=_as_int("expires_in"),
+            user_id=_as_int("user_id"),
+        )
+
+    code = params.get("code")
+    if code:
+        return AuthCode(
+            code=code,
+            device_id=params.get("device_id"),
+            state=params.get("state"),
+        )
+
+    raise ValueError("В адресе нет ни access_token, ни code")
+
+
+def parse_implicit_redirect(pasted: str) -> ImplicitToken:
+    """Like parse_redirect, but only accepts an implicit-flow result."""
+    result = parse_redirect(pasted)
+    if not isinstance(result, ImplicitToken):
+        raise ValueError("В адресе нет access_token")
+    return result

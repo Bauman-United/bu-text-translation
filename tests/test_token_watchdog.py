@@ -7,7 +7,9 @@ from services.token_watchdog import WarningKind, evaluate_token
 from utils.game_schedule import GameSchedule
 from utils.vk_token_store import VKTokens
 
-NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+# Anchored to the real clock: token_for() builds expiry from time.time(), and
+# a frozen NOW would drift past it within a day.
+NOW = datetime.now(timezone.utc)
 
 
 def game_in(hours, mode="comments"):
@@ -69,6 +71,14 @@ def test_site_mode_games_do_not_need_a_vk_token():
 
 def test_token_without_known_expiry_is_not_nagged_about():
     assert evaluate_token(VKTokens("tok", expires_at=0), [game_in(10)], NOW).kind is WarningKind.NONE
+
+
+def test_refreshable_token_is_never_nagged_about():
+    """A code-flow token set renews itself — even expired it is fine."""
+    expired_but_refreshable = VKTokens(
+        "tok", refresh_token="ref", device_id="dev", expires_at=time.time() - 60
+    )
+    assert evaluate_token(expired_but_refreshable, [game_in(10)], NOW).kind is WarningKind.NONE
 
 
 def test_warning_key_is_stable_so_it_is_sent_once():
