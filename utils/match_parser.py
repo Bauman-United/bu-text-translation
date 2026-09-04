@@ -125,14 +125,6 @@ def _site_score_to_bu_first(score: str, our_team_position: int) -> str:
     return score
 
 
-def _element_classes(val) -> List[str]:
-    if val is None:
-        return []
-    if isinstance(val, str):
-        return val.split()
-    return list(val)
-
-
 def _team_name_from_game_header_link(link) -> Optional[str]:
     div = link.find("div", class_="game-header__text")
     if not div:
@@ -144,26 +136,25 @@ def _team_name_from_game_header_link(link) -> Optional[str]:
     return text or None
 
 
-def _extract_teams_from_game_section(soup: BeautifulSoup) -> Optional[Tuple[str, str]]:
-    """Fallback: team names from the main match scoreboard (works before kickoff)."""
-    section = soup.find(
-        "section", class_=lambda c: c and "game--shadow" in _element_classes(c),
-    )
-    if not section:
-        section = soup.find("section", class_=lambda c: c and "game" in _element_classes(c))
-    if not section:
-        return None
-    units = section.find_all("div", class_="game__unit", limit=2)
+def _extract_teams_from_match_header(soup: BeautifulSoup) -> Optional[Tuple[str, str]]:
+    """
+    Fallback: team names from the match scoreboard header.
+
+    Join.Football only renders the game-header/timeline blocks once a match has
+    events; before kickoff the page carries just this header, so it is the only
+    place the two sides can be read from for an upcoming match.
+    """
+    units = soup.find_all("div", class_="blk-matchheader__unit", limit=2)
     if len(units) < 2:
         return None
     names: List[str] = []
     for unit in units:
         name = None
-        name_div = unit.find("div", class_="game__team-name")
+        name_div = unit.find("div", class_="blk-matchheader__team-name")
         if name_div:
             name = name_div.get_text(strip=True)
         if not name:
-            tlink = unit.find("a", class_="game__team-link")
+            tlink = unit.find("a", class_="blk-matchheader__team-link")
             if tlink and tlink.get("title"):
                 name = str(tlink["title"]).strip()
         if not name:
@@ -187,9 +178,9 @@ def _extract_match_teams(soup: BeautifulSoup) -> Tuple[str, str]:
             n2 = _team_name_from_game_header_link(links[1])
             if n1 and n2:
                 return n1, n2
-    from_section = _extract_teams_from_game_section(soup)
-    if from_section:
-        return from_section
+    from_header = _extract_teams_from_match_header(soup)
+    if from_header:
+        return from_header
     raise ValueError("Could not find both team names on the match page")
 
 
