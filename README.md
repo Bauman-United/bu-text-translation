@@ -194,11 +194,14 @@ The bot detects and processes comments in the following formats:
 ### 🎬 Celebration Videos
 
 The bot includes celebration videos for specific players:
+- **алексеев** → `celebrations/алексеев.mp4`
 - **богомолов/багич** → `celebrations/богомолов.mp4`
 - **заночуев** → `celebrations/заночуев.mp4`
 - **панферов/панфёров** → `celebrations/панферов.mp4`
 - **писарев/писарь** → `celebrations/писарев.mp4`
+- **поляшов/поляшёв** → `celebrations/поляшов.mp4`
 - **шевченко/шева** → `celebrations/шевченко.mp4`
+- **яковлев** → `celebrations/яковлев.mp4`
 - **Other players** → `celebrations/другие.mp4`
 
 ## Message Format
@@ -259,11 +262,14 @@ bu-text-translation/
 │   ├── translation_monitor.py    # Individual stream monitoring
 │   └── group_stream_monitor.py  # Group stream discovery
 ├── celebrations/              # Player celebration videos
+│   ├── алексеев.mp4
 │   ├── богомолов.mp4
 │   ├── заночуев.mp4
 │   ├── панферов.mp4
 │   ├── писарев.mp4
+│   ├── поляшов.mp4
 │   ├── шевченко.mp4
+│   ├── яковлев.mp4
 │   └── другие.mp4
 ├── requirements.txt           # Python dependencies
 ├── env.example               # Example environment configuration

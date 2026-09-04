@@ -1,8 +1,13 @@
 """Tests for the shared goal announcer."""
 
+from pathlib import Path
+
 import pytest
 
 from services.goal_announcer import (
+    _CELEBRATION_BY_SURNAME,
+    _DEFAULT_CELEBRATION,
+    CELEBRATION_ROOT,
     GoalAnnouncer,
     ScoreTracker,
     get_celebration_video_path,
@@ -119,10 +124,21 @@ def test_channel_trackers_are_shared_and_resettable():
     ("панфёров", "celebrations/панферов.mp4"),
     ("Писарев", "celebrations/писарев.mp4"),
     ("Заночуев", "celebrations/заночуев.mp4"),
+    ("Алексеев", "celebrations/алексеев.mp4"),
+    ("поляшов", "celebrations/поляшов.mp4"),
+    ("Яковлев", "celebrations/яковлев.mp4"),
     ("Гангелин", "celebrations/другие.mp4"),
 ])
 def test_celebration_video_lookup_is_case_insensitive(surname, expected):
     assert get_celebration_video_path(surname) == expected
+
+
+def test_every_mapped_celebration_clip_exists():
+    """A surname mapped to a missing file silently degrades to a plain message."""
+    root = Path(__file__).resolve().parent.parent
+    clips = set(_CELEBRATION_BY_SURNAME.values()) | {_DEFAULT_CELEBRATION}
+    missing = [c for c in sorted(clips) if not (root / CELEBRATION_ROOT / f"{c}.mp4").exists()]
+    assert missing == []
 
 
 # ---------------------------------------------------------------------------

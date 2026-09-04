@@ -25,6 +25,7 @@ CELEBRATION_ROOT = "celebrations"
 # Surnames and nicknames that map to a player's own celebration clip.
 # Anything unlisted falls back to the shared one.
 _CELEBRATION_BY_SURNAME = {
+    "алексеев": "алексеев",
     "богомолов": "богомолов",
     "багич": "богомолов",
     "заночуев": "заночуев",
@@ -34,8 +35,11 @@ _CELEBRATION_BY_SURNAME = {
     "панфёров": "панферов",
     "писарь": "писарев",
     "писарев": "писарев",
+    "поляшов": "поляшов",
+    "поляшёв": "поляшов",
     "шева": "шевченко",
     "шевченко": "шевченко",
+    "яковлев": "яковлев",
 }
 _DEFAULT_CELEBRATION = "другие"
 
