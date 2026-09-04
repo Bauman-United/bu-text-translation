@@ -127,6 +127,8 @@ def test_channel_trackers_are_shared_and_resettable():
     ("Алексеев", "celebrations/алексеев.mp4"),
     ("Гришанов", "celebrations/гришанов.mp4"),
     ("гришан", "celebrations/гришанов.mp4"),
+    ("Жарких", "celebrations/жарких.mp4"),
+    ("жар", "celebrations/жарких.mp4"),
     ("КАЛИНИЧЕНКО", "celebrations/калиниченко.mp4"),
     ("Королёв", "celebrations/королев.mp4"),
     ("Король", "celebrations/королев.mp4"),
