@@ -126,10 +126,14 @@ def test_channel_trackers_are_shared_and_resettable():
     ("Заночуев", "celebrations/заночуев.mp4"),
     ("Алексеев", "celebrations/алексеев.mp4"),
     ("Гришанов", "celebrations/гришанов.mp4"),
+    ("гришан", "celebrations/гришанов.mp4"),
     ("КАЛИНИЧЕНКО", "celebrations/калиниченко.mp4"),
     ("Королёв", "celebrations/королев.mp4"),
+    ("Король", "celebrations/королев.mp4"),
     ("поляшов", "celebrations/поляшов.mp4"),
+    ("Поляш", "celebrations/поляшов.mp4"),
     ("Яковлев", "celebrations/яковлев.mp4"),
+    ("ярик", "celebrations/яковлев.mp4"),
     ("Гангелин", "celebrations/другие.mp4"),
 ])
 def test_celebration_video_lookup_is_case_insensitive(surname, expected):

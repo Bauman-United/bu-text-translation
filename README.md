@@ -196,15 +196,15 @@ The bot detects and processes comments in the following formats:
 The bot includes celebration videos for specific players:
 - **алексеев** → `celebrations/алексеев.mp4`
 - **богомолов/багич** → `celebrations/богомолов.mp4`
-- **гришанов** → `celebrations/гришанов.mp4`
+- **гришанов/гришан** → `celebrations/гришанов.mp4`
 - **заночуев** → `celebrations/заночуев.mp4`
 - **калиниченко** → `celebrations/калиниченко.mp4`
-- **королев/королёв** → `celebrations/королев.mp4`
+- **королев/королёв/король** → `celebrations/королев.mp4`
 - **панферов/панфёров** → `celebrations/панферов.mp4`
 - **писарев/писарь** → `celebrations/писарев.mp4`
-- **поляшов/поляшёв** → `celebrations/поляшов.mp4`
+- **поляшов/поляшёв/поляш** → `celebrations/поляшов.mp4`
 - **шевченко/шева** → `celebrations/шевченко.mp4`
-- **яковлев** → `celebrations/яковлев.mp4`
+- **яковлев/ярик** → `celebrations/яковлев.mp4`
 - **Other players** → `celebrations/другие.mp4`
 
 ## Message Format
