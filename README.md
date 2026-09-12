@@ -200,7 +200,9 @@ The bot includes celebration videos for specific players:
 - **жарких/жар** → `celebrations/жарких.mp4`
 - **заночуев** → `celebrations/заночуев.mp4`
 - **калиниченко** → `celebrations/калиниченко.mp4`
+- **колочков/колач** → `celebrations/колочков.mp4`
 - **королев/королёв/король** → `celebrations/королев.mp4`
+- **курмакаев** → `celebrations/курмакаев.mp4`
 - **панферов/панфёров** → `celebrations/панферов.mp4`
 - **писарев/писарь** → `celebrations/писарев.mp4`
 - **поляшов/поляшёв/поляш** → `celebrations/поляшов.mp4`
@@ -272,7 +274,9 @@ bu-text-translation/
 │   ├── жарких.mp4
 │   ├── заночуев.mp4
 │   ├── калиниченко.mp4
+│   ├── колочков.mp4
 │   ├── королев.mp4
+│   ├── курмакаев.mp4
 │   ├── панферов.mp4
 │   ├── писарев.mp4
 │   ├── поляшов.mp4
