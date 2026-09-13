@@ -280,7 +280,8 @@ class VKGroupStreamMonitor:
             await self.send_notification(
                 "🔑 <b>Мониторинг VK остановлен</b>\n\n"
                 "Авторизация VK недействительна и не обновляется автоматически.\n"
-                "Запусти на сервере: <code>python scripts/vk_authorize.py</code>"
+                "Пришли боту /set_vk_token, чтобы получить ссылку и вставить новый токен "
+                "(инструкция: docs/VK_TOKEN.md)."
             )
             return False
         except Exception as e:

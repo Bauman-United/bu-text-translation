@@ -60,6 +60,12 @@ def _is_owner(update: Update, config: Config) -> bool:
         return False
 
 
+# VK error codes that say "slow down", not "bad token".
+_TRANSIENT_VK_CODES = {6, 9, 10}
+_VERIFY_ATTEMPTS = 3
+_VERIFY_RETRY_DELAY = 5  # seconds
+
+
 def _verify_token(token: str) -> dict:
     """
     Call users.get to prove the token works before we store it.
@@ -68,6 +74,29 @@ def _verify_token(token: str) -> dict:
     """
     api = vk_api.VkApi(token=token, api_version="5.199").get_api()
     return api.users.get()[0]
+
+
+async def _verify_token_with_retries(token: str) -> tuple[Optional[dict], Optional[Exception]]:
+    """
+    Verify the token, retrying on flood control / rate limits.
+
+    Returns (owner, None) on success, (None, error) when VK rejected the token,
+    and (None, transient_error) when every attempt hit a transient limit.
+    """
+    last_error: Optional[Exception] = None
+    for attempt in range(1, _VERIFY_ATTEMPTS + 1):
+        try:
+            return await asyncio.to_thread(_verify_token, token), None
+        except Exception as e:
+            last_error = e
+            if getattr(e, "code", None) not in _TRANSIENT_VK_CODES:
+                return None, e
+            logger.warning(
+                f"VK token check hit a transient limit (attempt {attempt}/{_VERIFY_ATTEMPTS}): {e}"
+            )
+            if attempt < _VERIFY_ATTEMPTS:
+                await asyncio.sleep(_VERIFY_RETRY_DELAY)
+    return None, last_error
 
 
 def describe_token_state() -> str:
@@ -231,21 +260,32 @@ async def _store_from_implicit(
     update: Update, parsed: ImplicitToken
 ) -> Optional[VKTokens]:
     """Validate a pasted implicit-flow token and persist it."""
-    try:
-        owner = await asyncio.to_thread(_verify_token, parsed.access_token)
-    except Exception as e:
-        code = getattr(e, "code", None)
-        hint = ""
-        if code == 5 and "ip address" in str(e).lower():
-            hint = (
-                "\n\nТокен привязан к IP, с которого ты авторизовался. "
-                "Открой ссылку через прокси сервера (например, ssh -D) и попробуй снова."
+    owner, error = await _verify_token_with_retries(parsed.access_token)
+    if error is not None:
+        code = getattr(error, "code", None)
+        if code in _TRANSIENT_VK_CODES:
+            # Flood control says nothing about the token itself. Store it and
+            # let the monitor prove it on the next wall.get instead of making
+            # the owner re-authorize for no reason.
+            logger.warning(f"Storing VK token unverified after transient VK errors: {error}")
+            await update.message.reply_text(
+                f"⚠️ VK временно ограничил запросы (code={code}): {error}\n\n"
+                "Сохраняю токен без проверки — мониторинг проверит его при следующем запросе. "
+                "Если через несколько минут снова придёт ошибка авторизации, повтори /set_vk_token."
             )
-        await update.message.reply_text(
-            f"❌ VK отклонил токен (code={code}): {e}{hint}\n\n"
-            "Пришли /set_vk_token без аргументов и получи свежую ссылку."
-        )
-        return None
+            owner = {}
+        else:
+            hint = ""
+            if code == 5 and "ip address" in str(error).lower():
+                hint = (
+                    "\n\nТокен привязан к IP, с которого ты авторизовался. "
+                    "Открой ссылку через прокси сервера (например, ssh -D) и попробуй снова."
+                )
+            await update.message.reply_text(
+                f"❌ VK отклонил токен (code={code}): {error}{hint}\n\n"
+                "Пришли /set_vk_token без аргументов и получи свежую ссылку."
+            )
+            return None
 
     expires_at = 0.0
     if parsed.expires_in:
