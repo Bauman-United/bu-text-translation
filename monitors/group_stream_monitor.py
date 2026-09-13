@@ -13,7 +13,7 @@ from typing import Set, Optional
 from telegram.ext import Application
 
 from api.vk_auth import VKAuthError
-from api.vk_client import VKClient
+from api.vk_client import VKClient, VKFloodControl
 from utils.url_parser import extract_group_id
 from monitors.translation_monitor import VKTranslationMonitor
 from config.settings import Config
@@ -284,6 +284,11 @@ class VKGroupStreamMonitor:
                 "(инструкция: docs/VK_TOKEN.md)."
             )
             return False
+        except VKFloodControl as e:
+            # Cooldown after VK flood control: the client fails fast without
+            # touching VK, so just keep the loop alive quietly.
+            logger.debug(str(e))
+            return True
         except Exception as e:
             logger.error(f"Error checking for new streams: {e}")
             return True

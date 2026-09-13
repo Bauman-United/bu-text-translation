@@ -18,6 +18,22 @@ from utils.vk_token_store import VKTokens, load_tokens, save_from_response
 
 logger = logging.getLogger(__name__)
 
+# VK error codes meaning "the account is being throttled", not "the request is
+# wrong": 6 = too many requests per second, 9 = flood control. Flood control in
+# particular is an account-level soft block that VK extends while we keep
+# knocking, so after seeing it we stop calling VK for a while.
+FLOOD_ERROR_CODES = {6, 9}
+FLOOD_BACKOFF_INITIAL = 300.0   # 5 min after the first hit
+FLOOD_BACKOFF_MAX = 1800.0      # ... doubling up to 30 min
+
+
+class VKFloodControl(Exception):
+    """VK is throttling the account; calls are paused until the cooldown ends."""
+
+    def __init__(self, message: str, retry_at: float):
+        super().__init__(message)
+        self.retry_at = retry_at
+
 
 class VKRateLimiter:
     """
@@ -146,6 +162,11 @@ class VKClient:
     _refresh_lock = asyncio.Lock()
     # Notify the owner about a dead authorization only once per process.
     _auth_failure_reported = False
+    # Flood-control cooldown is per VK account, so it is shared by every client
+    # in the process: while it lasts, `_call` fails fast without touching VK.
+    _flood_until = 0.0
+    _flood_backoff = 0.0
+    _flood_reported = False
 
     def __init__(
         self,
@@ -320,6 +341,7 @@ class VKClient:
         auth_retried = False
 
         while True:
+            self._raise_if_flood_cooldown(request_info)
             await self._ensure_session()
 
             method = self.vk_api
@@ -331,9 +353,13 @@ class VKClient:
             try:
                 result = await _run_in_thread(method, **params)
                 logger.info(f"VK API request completed: {request_info}")
+                self._clear_flood_cooldown()
                 return result
             except vk_api.exceptions.ApiError as e:
                 error_code = getattr(e, "code", None)
+
+                if error_code in FLOOD_ERROR_CODES:
+                    raise await self._enter_flood_cooldown(request_info, e) from e
 
                 if error_code == 5 and not auth_retried:
                     # Token died mid-flight (expired early, or revoked).
@@ -371,6 +397,54 @@ class VKClient:
                 raise
             finally:
                 await self.rate_limiter.mark_call_complete()
+
+    # ------------------------------------------------------------------
+    # Flood-control cooldown
+    # ------------------------------------------------------------------
+
+    def _raise_if_flood_cooldown(self, request_info: str) -> None:
+        """Fail fast while VK's flood control cooldown is active."""
+        remaining = VKClient._flood_until - time.time()
+        if remaining > 0:
+            raise VKFloodControl(
+                f"VK flood control: skipping {request_info}, next attempt in {int(remaining)}s",
+                retry_at=VKClient._flood_until,
+            )
+
+    async def _enter_flood_cooldown(
+        self, request_info: str, error: Exception
+    ) -> VKFloodControl:
+        """Start (or extend) the cooldown after VK throttled us; notify once."""
+        if VKClient._flood_backoff <= 0:
+            backoff = FLOOD_BACKOFF_INITIAL
+        else:
+            backoff = min(VKClient._flood_backoff * 2, FLOOD_BACKOFF_MAX)
+        VKClient._flood_backoff = backoff
+        VKClient._flood_until = time.time() + backoff
+        logger.error(
+            f"VK flood control on {request_info}: {error} — pausing VK calls for {int(backoff)}s"
+        )
+        if not VKClient._flood_reported:
+            VKClient._flood_reported = True
+            await self._notify_error(
+                request_info,
+                str(getattr(error, "code", "")) or None,
+                f"{error}. VK притормозил аккаунт; запросы к VK приостановлены на "
+                f"{int(backoff // 60)} мин и будут возобновляться с растущей паузой. "
+                "Повторных уведомлений не будет, пока VK не ответит нормально.",
+            )
+        return VKFloodControl(
+            f"VK flood control on {request_info}: {error}",
+            retry_at=VKClient._flood_until,
+        )
+
+    def _clear_flood_cooldown(self) -> None:
+        """A successful call means the throttling episode is over."""
+        if VKClient._flood_backoff or VKClient._flood_reported:
+            logger.info("VK flood control lifted — normal polling resumes")
+        VKClient._flood_until = 0.0
+        VKClient._flood_backoff = 0.0
+        VKClient._flood_reported = False
 
     async def _notify_error(self, request_info: str, error_code: Optional[str], message: str):
         """Send an error notification, never letting the notifier break the call path."""

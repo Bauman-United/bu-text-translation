@@ -12,7 +12,7 @@ from typing import Set
 from telegram.ext import Application
 
 from api.vk_auth import VKAuthError
-from api.vk_client import VKClient
+from api.vk_client import VKClient, VKFloodControl
 from utils.url_parser import parse_video_url, parse_score_comment
 from config.settings import Config
 from services.goal_announcer import GoalAnnouncer, get_channel_tracker
@@ -250,6 +250,9 @@ class VKTranslationMonitor:
                 if not is_active:
                     break
                 await asyncio.sleep(30)  # Check every 30 seconds
+            except VKFloodControl as e:
+                logger.debug(str(e))
+                await asyncio.sleep(30)
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
                 await asyncio.sleep(30)
