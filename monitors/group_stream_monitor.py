@@ -46,8 +46,6 @@ class VKGroupStreamMonitor:
         self.user_id = user_id
         # Track streams we've already started monitoring (by video id "owner_id_id")
         self.seen_streams: Set[str] = set()
-        # Track last seen wall post id to only process new posts
-        self.last_wall_post_id: Optional[int] = None
         self.is_active = True
         # Polling task handle, so a stopped poller can be brought back after the
         # token is replaced instead of requiring a container restart.
@@ -66,11 +64,11 @@ class VKGroupStreamMonitor:
     
     async def check_for_new_streams(self) -> bool:
         """
-        Check for new wall posts in the VK group and start monitoring any live stream videos found.
+        Check the VK group's videos and start monitoring any live stream found.
 
-        Wall polling only happens when at least one "comments"-mode game is
-        inside its monitoring window.  When all active games are "site"-mode,
-        the wall is not polled and any VK comment monitors are stopped.
+        VK is only polled when at least one "comments"-mode game is inside its
+        monitoring window.  When all active games are "site"-mode, VK is not
+        polled and any VK comment monitors are stopped.
 
         Also detects parse_mode changes and switches monitors accordingly.
         
@@ -88,7 +86,7 @@ class VKGroupStreamMonitor:
             current_modes = {s.id: s.parse_mode for s in all_schedules}
             await self._detect_mode_changes(current_modes)
 
-            # Only poll the wall when at least one "comments"-mode game is active.
+            # Only poll VK when at least one "comments"-mode game is active.
             comments_in_window = is_time_in_any_window(now, parse_mode="comments")
 
             if not comments_in_window:
@@ -109,170 +107,34 @@ class VKGroupStreamMonitor:
                 )
                 return True
             
-            logger.info(f"Checking for new wall posts in group {self.group_id}")
-            
-            posts = await self.vk_client.get_group_wall_posts(self.group_id, count=30)
-            if not posts:
-                logger.debug("No wall posts returned")
-                return True
+            # Discover streams via video.get, not wall.get: a live broadcast is in
+            # the group's video list from the moment it starts, and wall.get can
+            # sit under VK flood control for weeks while video.get still answers.
+            logger.info(f"Checking group {self.group_id} videos for live streams")
+            videos = await self.vk_client.get_group_recent_videos(self.group_id, count=10)
 
-            # Debug: show what we got from VK (ids + attachment types for newest few)
-            try:
-                newest_preview = posts[:5]
-                logger.info(
-                    "VK wall.get preview (newest first): "
-                    + ", ".join(
-                        f"id={p.get('id')} att={[a.get('type') for a in (p.get('attachments') or [])]}"
-                        f"{' copy_history=' + str(len(p.get('copy_history') or [])) if (p.get('copy_history') or []) else ''}"
-                        for p in newest_preview
-                    )
-                )
-            except Exception:
-                # Never fail monitoring due to debug logging
-                pass
-            
-            # wall.get returns newest first; we want to process only posts newer than last_wall_post_id
-            if self.last_wall_post_id is None:
-                # First run: initialize watermark to current newest post id, don't back-process history
-                newest_id = max((p.get('id') or 0) for p in posts)
-                self.last_wall_post_id = int(newest_id) if newest_id else 0
-                logger.info(f"Initialized wall post watermark: {self.last_wall_post_id} (newest wall post id)")
-
-                # IMPORTANT: Also process the latest wall post once.
-                # This satisfies "catch last post" behavior without scanning old history.
-                newest_posts = [p for p in posts if (p.get('id') or 0) == int(self.last_wall_post_id)]
-                if not newest_posts and posts:
-                    newest_posts = [posts[0]]
-                
-                started = 0
-                for post in newest_posts:
-                    post_id = post.get('id')
-                    post_dt = None
-                    if post.get('date') is not None:
-                        try:
-                            post_dt = datetime.fromtimestamp(int(post.get('date')), tz=timezone.utc)
-                        except Exception:
-                            post_dt = None
-
-                    videos = self.vk_client.extract_videos_from_wall_post(post)
-                    if not videos:
-                        att_types = [a.get('type') for a in (post.get('attachments') or [])]
-                        ch_len = len(post.get('copy_history') or [])
-                        logger.info(
-                            f"Init wall post {post_id}: no video attachments found "
-                            f"(attachments={att_types}, copy_history={ch_len})"
-                        )
-                        continue
-                    
-                    for video in videos:
-                        logger.info(
-                            f"Init wall post {post_id}: found video owner_id={video.get('owner_id')} id={video.get('id')} "
-                            f"live={video.get('live')} live_status={video.get('live_status')} is_mobile_live={video.get('is_mobile_live')} "
-                            f"type={video.get('type')}"
-                        )
-                        if not self.vk_client.is_live_stream(video):
-                            continue
-                        
-                        video_id = self.vk_client.get_video_id(video)
-                        title = video.get('title', 'Live Stream')
-                        stream_url = self.vk_client.get_video_url(video)
-
-                        # Safety: only start monitoring if this wall post is within a "comments" window.
-                        if post_dt is not None and not is_time_in_any_window(post_dt, parse_mode="comments"):
-                            logger.info(
-                                f"Skipping stream from wall post {post_id} because post_dt is outside 'comments' windows "
-                                f"(post_dt={post_dt.isoformat()})"
-                            )
-                            continue
-                        
-                        if stream_url in active_translations:
-                            logger.debug(f"Live stream already being monitored (init from wall post {post_id}): {video_id}")
-                            continue
-                        if video_id in self.seen_streams:
-                            logger.debug(f"Live stream already seen (init from wall post {post_id}): {video_id}")
-                            continue
-                        
-                        logger.info(f"NEW LIVE STREAM FROM LAST WALL POST {post_id}: {video_id} - {title}")
-                        self.seen_streams.add(video_id)
-                        await self.handle_new_stream(video)
-                        started += 1
-                
-                logger.info(f"Init processing complete. Started {started} live stream monitor(s) from last wall post.")
-                return True
-            
-            new_posts = [p for p in posts if (p.get('id') or 0) > int(self.last_wall_post_id)]
-            if not new_posts:
-                logger.debug(f"No new wall posts since last check (watermark={self.last_wall_post_id})")
-                return True
-            
-            # Process oldest -> newest to preserve order
-            new_posts.sort(key=lambda p: p.get('id') or 0)
-            logger.info(
-                f"New wall posts detected: ids={[p.get('id') for p in new_posts]} (watermark={self.last_wall_post_id})"
-            )
-            
             started = 0
-            for post in new_posts:
-                post_id = post.get('id')
-                post_dt = None
-                if post.get('date') is not None:
-                    try:
-                        post_dt = datetime.fromtimestamp(int(post.get('date')), tz=timezone.utc)
-                    except Exception:
-                        post_dt = None
-
-                videos = self.vk_client.extract_videos_from_wall_post(post)
-                if not videos:
-                    # Log attachment types to understand why we didn't see videos
-                    att_types = [a.get('type') for a in (post.get('attachments') or [])]
-                    ch_len = len(post.get('copy_history') or [])
-                    logger.info(f"Wall post {post_id}: no video attachments found (attachments={att_types}, copy_history={ch_len})")
+            for video in videos:
+                if not self.vk_client.is_live_stream(video):
                     continue
-                
-                for video in videos:
-                    logger.info(
-                        f"Wall post {post_id}: found video owner_id={video.get('owner_id')} id={video.get('id')} "
-                        f"live={video.get('live')} live_status={video.get('live_status')} is_mobile_live={video.get('is_mobile_live')} "
-                        f"type={video.get('type')}"
-                    )
-                    if not self.vk_client.is_live_stream(video):
-                        continue
-                    
-                    video_id = self.vk_client.get_video_id(video)
-                    title = video.get('title', 'Live Stream')
-                    stream_url = self.vk_client.get_video_url(video)
 
-                    # Only start monitoring if wall post date is within a "comments" window.
-                    if post_dt is not None and not is_time_in_any_window(post_dt, parse_mode="comments"):
-                        logger.info(
-                            f"Skipping stream from wall post {post_id} because post_dt is outside 'comments' windows "
-                            f"(post_dt={post_dt.isoformat()})"
-                        )
-                        continue
-                    
-                    if stream_url in active_translations:
-                        logger.debug(f"Live stream already being monitored (from wall post {post_id}): {video_id}")
-                        continue
-                    if video_id in self.seen_streams:
-                        logger.debug(f"Live stream already seen (from wall post {post_id}): {video_id}")
-                        continue
-                    
-                    logger.info(f"NEW LIVE STREAM FROM WALL POST {post_id}: {video_id} - {title}")
-                    self.seen_streams.add(video_id)
-                    await self.handle_new_stream(video)
-                    started += 1
-            
-            # Advance watermark
-            newest_processed = max((p.get('id') or 0) for p in new_posts)
-            self.last_wall_post_id = max(int(self.last_wall_post_id), int(newest_processed or 0))
-            
-            logger.info(
-                f"Processed {len(new_posts)} new wall post(s), started {started} live stream monitor(s). "
-                f"Watermark now {self.last_wall_post_id}"
-            )
-            
+                video_id = self.vk_client.get_video_id(video)
+                stream_url = self.vk_client.get_video_url(video)
+                if video_id in self.seen_streams or stream_url in active_translations:
+                    continue
+
+                logger.info(
+                    f"NEW LIVE STREAM: {video_id} - {video.get('title', 'Live Stream')} "
+                    f"(live={video.get('live')} live_status={video.get('live_status')})"
+                )
+                self.seen_streams.add(video_id)
+                await self.handle_new_stream(video)
+                started += 1
+
+            if started:
+                logger.info(f"Started {started} live stream monitor(s)")
             return True
-            
+
         except VKAuthError as e:
             # Retrying cannot help until a human re-authorizes, and each retry
             # fired another error notification every 30 seconds.
@@ -337,7 +199,7 @@ class VKGroupStreamMonitor:
                 logger.info(f"Stopped site monitor {schedule_id} due to mode switch → comments")
             await self.send_notification(
                 "🔄 Обнаружена смена режима → 📺 VK комментарии\n"
-                "Мониторинг сайта остановлен, начинается мониторинг стены VK."
+                "Мониторинг сайта остановлен, начинается поиск трансляции в VK."
             )
 
     async def handle_new_stream(self, stream: dict):
@@ -445,12 +307,6 @@ class VKGroupStreamMonitor:
             f"✅ Started monitoring VK group {self.group_id} for new live streams\n"
             f"⏱ Checking every 30 seconds"
         )
-        # Initialize watermark on first check (no back-processing history)
-        try:
-            await self.check_for_new_streams()
-        except Exception as e:
-            logger.error(f"Error during initial wall watermark setup: {e}")
-        
         # Start polling loop
         while self.is_active:
             try:

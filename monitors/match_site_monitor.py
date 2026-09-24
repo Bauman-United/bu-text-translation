@@ -19,6 +19,10 @@ from utils.match_parser import fetch_match_html, parse_match_page
 
 logger = logging.getLogger(__name__)
 
+# A match lasts an hour. If the protocol shows no events by then, it is not
+# being kept live, so there is no point waiting out the extra time.
+MATCH_DURATION = timedelta(hours=1)
+
 
 def _score_to_pair(score: str) -> Optional[tuple]:
     """Turn a timeline score like "2 : 1" into (2, 1)."""
@@ -49,6 +53,8 @@ class MatchSiteMonitor:
         self.user_id = user_id
         self.is_active = True
         self.seen_scores: Set[str] = seen_scores if seen_scores is not None else set()
+        # Set once the protocol shows any event (goal, card, ...) during the match.
+        self.protocol_updated = False
 
         self.announcer = None
         self.gpt_service = None
@@ -82,6 +88,8 @@ class MatchSiteMonitor:
             )
             parsed = parse_match_page(html)
             goals = parsed.goals
+            if parsed.event_count:
+                self.protocol_updated = True
         except Exception as e:
             logger.error(f"Site monitor {self.schedule_id}: error fetching page — {e}")
             return
@@ -117,6 +125,7 @@ class MatchSiteMonitor:
         """Wait for the monitoring window, then poll every 60 s."""
         start_time = self.game_datetime_utc - timedelta(minutes=5)
         end_time = self.game_datetime_utc + timedelta(hours=2)
+        match_end = self.game_datetime_utc + MATCH_DURATION
 
         logger.info(
             f"Site monitor {self.schedule_id}: window "
@@ -127,7 +136,8 @@ class MatchSiteMonitor:
             f"🌐 Мониторинг сайта запущен\n"
             f"🔗 {self.match_url}\n"
             f"⏱ Проверка каждые 60 секунд\n"
-            f"🕐 Окно: −5 мин … +2 ч от времени игры"
+            f"🕐 Окно: −5 мин … +2 ч от времени игры "
+            f"(или +1 ч, если протокол за матч не обновлялся)"
         )
 
         # Wait until 5 min before game (check is_active every 30 s)
@@ -147,6 +157,16 @@ class MatchSiteMonitor:
         while self.is_active:
             now = datetime.now(timezone.utc)
             if now > end_time:
+                break
+            if now > match_end and not self.protocol_updated:
+                logger.info(
+                    f"Site monitor {self.schedule_id}: no protocol events during the match, "
+                    f"closing at match end instead of waiting until {end_time.isoformat()}"
+                )
+                await self._send_user_notification(
+                    "🌐 Протокол матча не обновлялся весь матч — "
+                    "мониторинг сайта закрыт по окончании матча."
+                )
                 break
             await self.check_for_new_goals()
             await asyncio.sleep(60)

@@ -265,7 +265,7 @@ async def _store_from_implicit(
         code = getattr(error, "code", None)
         if code in _TRANSIENT_VK_CODES:
             # Flood control says nothing about the token itself. Store it and
-            # let the monitor prove it on the next wall.get instead of making
+            # let the monitor prove it on the next VK request instead of making
             # the owner re-authorize for no reason.
             logger.warning(f"Storing VK token unverified after transient VK errors: {error}")
             await update.message.reply_text(

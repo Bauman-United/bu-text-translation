@@ -39,6 +39,7 @@ class MatchParseResult:
     away_team: str  # team 2, гости
     our_team_position: int  # 1 = home, 2 = away
     timeline_present: bool  # False when js-game-live-timeline is missing (e.g. pre-kickoff)
+    event_count: int = 0  # all timeline entries (goals, cards, subs, ...)
 
 
 def format_match_teams_summary(result: MatchParseResult) -> str:
@@ -278,4 +279,5 @@ def parse_match_page(html: str) -> MatchParseResult:
         away_team=away_team,
         our_team_position=our_team_position,
         timeline_present=True,
+        event_count=len(timeline_items),
     )

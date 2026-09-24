@@ -11,7 +11,7 @@ from api.vk_client import VKClient, VKFloodControl
 
 
 class _FakeApi:
-    """Stands in for vk_api's method proxy: `api.wall.get(**params)`."""
+    """Stands in for vk_api's method proxy: `api.wall.get(**params)` / `api.video.get(...)`."""
 
     def __init__(self, responses):
         self.responses = list(responses)
@@ -19,6 +19,10 @@ class _FakeApi:
 
     @property
     def wall(self):
+        return self
+
+    @property
+    def video(self):
         return self
 
     def get(self, **params):
@@ -37,9 +41,9 @@ def _flood_error():
 
 @pytest.fixture
 def client(monkeypatch):
-    VKClient._flood_until = 0.0
-    VKClient._flood_backoff = 0.0
-    VKClient._flood_reported = False
+    VKClient._flood_until.clear()
+    VKClient._flood_backoff.clear()
+    VKClient._flood_reported.clear()
     monkeypatch.setattr(vc, "load_tokens", lambda: None)
 
     notifications = []
@@ -70,7 +74,7 @@ def test_flood_control_pauses_calls_and_notifies_once(client, monkeypatch):
         _run(client._call("wall.get", "wall.get(test)"))
     assert fake.calls == 1
     assert len(client.notifications) == 1
-    assert VKClient._flood_until > time.time()
+    assert VKClient._flood_until["wall.get"] > time.time()
 
     # Within the cooldown: no network call, no second notification.
     with pytest.raises(VKFloodControl):
@@ -85,15 +89,31 @@ def test_flood_backoff_doubles_and_resets_on_success(client, monkeypatch):
 
     with pytest.raises(VKFloodControl):
         _run(client._call("wall.get", "wall.get(test)"))
-    assert VKClient._flood_backoff == vc.FLOOD_BACKOFF_INITIAL
+    assert VKClient._flood_backoff["wall.get"] == vc.FLOOD_BACKOFF_INITIAL
 
-    VKClient._flood_until = 0.0  # pretend the cooldown elapsed
+    VKClient._flood_until["wall.get"] = 0.0  # pretend the cooldown elapsed
     with pytest.raises(VKFloodControl):
         _run(client._call("wall.get", "wall.get(test)"))
-    assert VKClient._flood_backoff == vc.FLOOD_BACKOFF_INITIAL * 2
+    assert VKClient._flood_backoff["wall.get"] == vc.FLOOD_BACKOFF_INITIAL * 2
 
-    VKClient._flood_until = 0.0
+    VKClient._flood_until["wall.get"] = 0.0
     assert _run(client._call("wall.get", "wall.get(test)")) == {"items": []}
-    assert VKClient._flood_backoff == 0.0
-    assert VKClient._flood_reported is False
+    assert "wall.get" not in VKClient._flood_backoff
+    assert "wall.get" not in VKClient._flood_reported
     assert fake.calls == 3
+
+
+def test_flood_on_one_method_does_not_block_others(client, monkeypatch):
+    fake = _FakeApi([_flood_error(), {"items": [{"id": 1}]}])
+    monkeypatch.setattr(client, "_rebuild_session", lambda token: setattr(client, "vk_api", fake))
+
+    with pytest.raises(VKFloodControl):
+        _run(client._call("wall.get", "wall.get(test)"))
+
+    # wall.get is cooling down, video.get still goes to VK.
+    assert _run(client._call("video.get", "video.get(test)")) == {"items": [{"id": 1}]}
+    assert fake.calls == 2
+    assert "wall.get" in VKClient._flood_until
+    with pytest.raises(VKFloodControl):
+        _run(client._call("wall.get", "wall.get(test)"))
+    assert fake.calls == 2

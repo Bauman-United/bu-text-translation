@@ -639,7 +639,7 @@ async def catch_existing_command(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         extracted_group_id = extract_group_id(config.VK_GROUP)
-        videos = await group_stream_monitor.vk_client.get_group_videos(extracted_group_id, count=20)
+        videos = await group_stream_monitor.vk_client.get_group_recent_videos(extracted_group_id, count=10)
 
         if not videos:
             await update.message.reply_text("❌ No videos found in group or access denied")

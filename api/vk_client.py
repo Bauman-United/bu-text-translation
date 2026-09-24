@@ -10,7 +10,7 @@ import logging
 import asyncio
 import sys
 import time
-from typing import Dict, List, Optional, Callable, Awaitable
+from typing import Dict, List, Optional, Set, Callable, Awaitable
 
 from api.vk_auth import VKAuthError, refresh_access_token
 from config.settings import Config
@@ -19,9 +19,10 @@ from utils.vk_token_store import VKTokens, load_tokens, save_from_response
 logger = logging.getLogger(__name__)
 
 # VK error codes meaning "the account is being throttled", not "the request is
-# wrong": 6 = too many requests per second, 9 = flood control. Flood control in
-# particular is an account-level soft block that VK extends while we keep
-# knocking, so after seeing it we stop calling VK for a while.
+# wrong": 6 = too many requests per second, 9 = flood control. Flood control is
+# a per-method soft block on the account that can last for days (wall.get stayed
+# blocked for 11+ days while video.get and video.getComments answered fine), so
+# after seeing it we stop calling that one method for a while.
 FLOOD_ERROR_CODES = {6, 9}
 FLOOD_BACKOFF_INITIAL = 300.0   # 5 min after the first hit
 FLOOD_BACKOFF_MAX = 1800.0      # ... doubling up to 30 min
@@ -162,11 +163,12 @@ class VKClient:
     _refresh_lock = asyncio.Lock()
     # Notify the owner about a dead authorization only once per process.
     _auth_failure_reported = False
-    # Flood-control cooldown is per VK account, so it is shared by every client
-    # in the process: while it lasts, `_call` fails fast without touching VK.
-    _flood_until = 0.0
-    _flood_backoff = 0.0
-    _flood_reported = False
+    # Flood-control cooldown is per VK account and method, so it is shared by
+    # every client in the process: while it lasts, `_call` fails fast for that
+    # method without touching VK. Other methods keep working.
+    _flood_until: Dict[str, float] = {}
+    _flood_backoff: Dict[str, float] = {}
+    _flood_reported: Set[str] = set()
 
     def __init__(
         self,
@@ -341,7 +343,7 @@ class VKClient:
         auth_retried = False
 
         while True:
-            self._raise_if_flood_cooldown(request_info)
+            self._raise_if_flood_cooldown(method_path, request_info)
             await self._ensure_session()
 
             method = self.vk_api
@@ -353,13 +355,13 @@ class VKClient:
             try:
                 result = await _run_in_thread(method, **params)
                 logger.info(f"VK API request completed: {request_info}")
-                self._clear_flood_cooldown()
+                self._clear_flood_cooldown(method_path)
                 return result
             except vk_api.exceptions.ApiError as e:
                 error_code = getattr(e, "code", None)
 
                 if error_code in FLOOD_ERROR_CODES:
-                    raise await self._enter_flood_cooldown(request_info, e) from e
+                    raise await self._enter_flood_cooldown(method_path, request_info, e) from e
 
                 if error_code == 5 and not auth_retried:
                     # Token died mid-flight (expired early, or revoked).
@@ -402,49 +404,51 @@ class VKClient:
     # Flood-control cooldown
     # ------------------------------------------------------------------
 
-    def _raise_if_flood_cooldown(self, request_info: str) -> None:
-        """Fail fast while VK's flood control cooldown is active."""
-        remaining = VKClient._flood_until - time.time()
+    def _raise_if_flood_cooldown(self, method_path: str, request_info: str) -> None:
+        """Fail fast while VK's flood control cooldown for this method is active."""
+        until = VKClient._flood_until.get(method_path, 0.0)
+        remaining = until - time.time()
         if remaining > 0:
             raise VKFloodControl(
                 f"VK flood control: skipping {request_info}, next attempt in {int(remaining)}s",
-                retry_at=VKClient._flood_until,
+                retry_at=until,
             )
 
     async def _enter_flood_cooldown(
-        self, request_info: str, error: Exception
+        self, method_path: str, request_info: str, error: Exception
     ) -> VKFloodControl:
-        """Start (or extend) the cooldown after VK throttled us; notify once."""
-        if VKClient._flood_backoff <= 0:
+        """Start (or extend) the method's cooldown after VK throttled it; notify once."""
+        previous = VKClient._flood_backoff.get(method_path, 0.0)
+        if previous <= 0:
             backoff = FLOOD_BACKOFF_INITIAL
         else:
-            backoff = min(VKClient._flood_backoff * 2, FLOOD_BACKOFF_MAX)
-        VKClient._flood_backoff = backoff
-        VKClient._flood_until = time.time() + backoff
+            backoff = min(previous * 2, FLOOD_BACKOFF_MAX)
+        VKClient._flood_backoff[method_path] = backoff
+        VKClient._flood_until[method_path] = time.time() + backoff
         logger.error(
-            f"VK flood control on {request_info}: {error} — pausing VK calls for {int(backoff)}s"
+            f"VK flood control on {request_info}: {error} — pausing {method_path} for {int(backoff)}s"
         )
-        if not VKClient._flood_reported:
-            VKClient._flood_reported = True
+        if method_path not in VKClient._flood_reported:
+            VKClient._flood_reported.add(method_path)
             await self._notify_error(
                 request_info,
                 str(getattr(error, "code", "")) or None,
-                f"{error}. VK притормозил аккаунт; запросы к VK приостановлены на "
+                f"{error}. VK притормозил метод {method_path}; запросы к нему приостановлены на "
                 f"{int(backoff // 60)} мин и будут возобновляться с растущей паузой. "
                 "Повторных уведомлений не будет, пока VK не ответит нормально.",
             )
         return VKFloodControl(
             f"VK flood control on {request_info}: {error}",
-            retry_at=VKClient._flood_until,
+            retry_at=VKClient._flood_until[method_path],
         )
 
-    def _clear_flood_cooldown(self) -> None:
-        """A successful call means the throttling episode is over."""
-        if VKClient._flood_backoff or VKClient._flood_reported:
-            logger.info("VK flood control lifted — normal polling resumes")
-        VKClient._flood_until = 0.0
-        VKClient._flood_backoff = 0.0
-        VKClient._flood_reported = False
+    def _clear_flood_cooldown(self, method_path: str) -> None:
+        """A successful call means the method's throttling episode is over."""
+        if method_path in VKClient._flood_backoff or method_path in VKClient._flood_reported:
+            logger.info(f"VK flood control on {method_path} lifted — normal polling resumes")
+        VKClient._flood_until.pop(method_path, None)
+        VKClient._flood_backoff.pop(method_path, None)
+        VKClient._flood_reported.discard(method_path)
 
     async def _notify_error(self, request_info: str, error_code: Optional[str], message: str):
         """Send an error notification, never letting the notifier break the call path."""
@@ -491,89 +495,23 @@ class VKClient:
         # VK returned newest-first; callers expect chronological order.
         return list(reversed(items))
 
-    async def get_group_wall_posts(self, group_id: str, count: int = 20) -> List[Dict]:
+    async def get_group_recent_videos(self, group_id: str, count: int = 10) -> List[Dict]:
         """
-        Get recent wall posts for a VK group.
+        Get the group's own most recent videos (newest first) via video.get.
 
-        Args:
-            group_id: VK group ID
-            count: Number of posts to retrieve
-
-        Returns:
-            List of wall post dictionaries (newest first)
+        Live streams show up here as soon as they start, with live fields set,
+        so this is how streams are discovered: wall.get can sit under VK flood
+        control for weeks while video.get keeps answering.
         """
         owner_id = -int(group_id)
-        request_info = f"wall.get(owner_id={owner_id}, count={min(count, 100)}, filter=all)"
-        wall_posts = await self._call(
-            "wall.get",
+        request_info = f"video.get(owner_id={owner_id}, count={min(count, 200)})"
+        response = await self._call(
+            "video.get",
             request_info,
             owner_id=owner_id,
-            count=min(count, 100),
-            filter="all",
+            count=min(count, 200),
         )
-
-        items = (wall_posts or {}).get("items") or []
-        if not items:
-            logger.debug("wall.get returned no items")
-        return items
-
-    async def get_group_videos(self, group_id: str, count: int = 20) -> List[Dict]:
-        """
-        Get videos attached to a group's recent wall posts.
-
-        Args:
-            group_id: VK group ID
-            count: Number of videos to retrieve
-
-        Returns:
-            List of video dictionaries
-        """
-        posts = await self.get_group_wall_posts(group_id, count=min(count * 2, 100))
-
-        all_videos: List[Dict] = []
-        owner_id = -int(group_id)
-        for post in posts:
-            for video_data in self.extract_videos_from_wall_post(post):
-                video_data.setdefault("owner_id", owner_id)
-                all_videos.append(video_data)
-
-        if not all_videos:
-            logger.warning("No videos found in group or access denied")
-            return []
-
-        logger.info(f"Total videos found: {len(all_videos)}")
-        return all_videos
-
-    def extract_videos_from_wall_post(self, post: Dict) -> List[Dict]:
-        """
-        Extract attached videos from a wall post.
-
-        Note: video objects from wall attachments typically already include live fields
-        (e.g. live/live_status/is_mobile_live) when applicable.
-        """
-        videos: List[Dict] = []
-
-        def _extract_from_attachments(attachments: List[Dict]):
-            for attachment in attachments or []:
-                atype = attachment.get('type')
-                if atype == 'video':
-                    video_data = attachment.get('video') or {}
-                    if video_data:
-                        videos.append(video_data)
-                elif atype == 'link':
-                    # Sometimes a wall post contains a link to a video/live, not a direct video
-                    # attachment. Parsing the link into a video object requires additional API
-                    # calls (video.get) which we intentionally avoid here.
-                    continue
-
-        # Direct attachments on the post
-        _extract_from_attachments((post or {}).get('attachments') or [])
-
-        # Reposts: attachments can be inside copy_history (list of nested post objects)
-        for parent in (post or {}).get('copy_history') or []:
-            _extract_from_attachments((parent or {}).get('attachments') or [])
-
-        return videos
+        return (response or {}).get("items") or []
 
     def is_live_stream(self, video: Dict) -> bool:
         """
@@ -606,8 +544,9 @@ class VKClient:
         if video_type == 'live' or (live_status is not None and live_status == 1):
             is_live = True
 
-        # If live_status is explicitly 'finished', it's not live (even if is_mobile_live is True)
-        if live_status_str == 'finished' and live_status != 1:
+        # A finished stream is not live. VK keeps live=1 on finished broadcasts
+        # (video.get returns live=1, live_status='finished'), so live_status wins.
+        if live_status_str in ('finished', 'failed'):
             is_live = False
 
         return is_live
