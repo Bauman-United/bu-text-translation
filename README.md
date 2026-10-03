@@ -196,16 +196,19 @@ The bot detects and processes comments in the following formats:
 The bot includes celebration videos for specific players:
 - **алексеев** → `celebrations/алексеев.mp4`
 - **богомолов/багич** → `celebrations/богомолов.mp4`
+- **валиев** → `celebrations/валиев.mp4`
 - **гришанов/гришан** → `celebrations/гришанов.mp4`
 - **жарких/жар** → `celebrations/жарких.mp4`
 - **заночуев** → `celebrations/заночуев.mp4`
-- **калиниченко** → `celebrations/калиниченко.mp4`
+- **калиниченко/калина** → `celebrations/калиниченко.mp4`
 - **колочков/колач** → `celebrations/колочков.mp4`
 - **королев/королёв/король** → `celebrations/королев.mp4`
-- **курмакаев** → `celebrations/курмакаев.mp4`
+- **курмакаев/рус** → `celebrations/курмакаев.mp4`
+- **мешков** → `celebrations/мешков.mp4`
 - **панферов/панфёров** → `celebrations/панферов.mp4`
 - **писарев/писарь** → `celebrations/писарев.mp4`
 - **поляшов/поляшёв/поляш** → `celebrations/поляшов.mp4`
+- **серов** → `celebrations/серов.mp4`
 - **шевченко/шева** → `celebrations/шевченко.mp4`
 - **яковлев/ярик** → `celebrations/яковлев.mp4`
 - **Other players** → `celebrations/другие.mp4`
@@ -270,6 +273,7 @@ bu-text-translation/
 ├── celebrations/              # Player celebration videos
 │   ├── алексеев.mp4
 │   ├── богомолов.mp4
+│   ├── валиев.mp4
 │   ├── гришанов.mp4
 │   ├── жарких.mp4
 │   ├── заночуев.mp4
@@ -277,9 +281,11 @@ bu-text-translation/
 │   ├── колочков.mp4
 │   ├── королев.mp4
 │   ├── курмакаев.mp4
+│   ├── мешков.mp4
 │   ├── панферов.mp4
 │   ├── писарев.mp4
 │   ├── поляшов.mp4
+│   ├── серов.mp4
 │   ├── шевченко.mp4
 │   ├── яковлев.mp4
 │   └── другие.mp4
