@@ -198,6 +198,7 @@ The bot includes celebration videos for specific players:
 - **богомолов/багич** → `celebrations/богомолов.mp4`
 - **валиев** → `celebrations/валиев.mp4`
 - **гришанов/гришан** → `celebrations/гришанов.mp4`
+- **долженков/долж** → `celebrations/долженков.mp4`
 - **жарких/жар** → `celebrations/жарких.mp4`
 - **заночуев** → `celebrations/заночуев.mp4`
 - **калиниченко/калина** → `celebrations/калиниченко.mp4`
@@ -207,8 +208,10 @@ The bot includes celebration videos for specific players:
 - **мешков** → `celebrations/мешков.mp4`
 - **панферов/панфёров** → `celebrations/панферов.mp4`
 - **писарев/писарь** → `celebrations/писарев.mp4`
+- **поляков/полян** → `celebrations/поляков.mp4`
 - **поляшов/поляшёв/поляш** → `celebrations/поляшов.mp4`
 - **серов** → `celebrations/серов.mp4`
+- **степанов/степ** → `celebrations/степанов.mp4`
 - **шевченко/шева** → `celebrations/шевченко.mp4`
 - **яковлев/ярик** → `celebrations/яковлев.mp4`
 - **Other players** → `celebrations/другие.mp4`
@@ -275,6 +278,7 @@ bu-text-translation/
 │   ├── богомолов.mp4
 │   ├── валиев.mp4
 │   ├── гришанов.mp4
+│   ├── долженков.mp4
 │   ├── жарких.mp4
 │   ├── заночуев.mp4
 │   ├── калиниченко.mp4
@@ -284,8 +288,10 @@ bu-text-translation/
 │   ├── мешков.mp4
 │   ├── панферов.mp4
 │   ├── писарев.mp4
+│   ├── поляков.mp4
 │   ├── поляшов.mp4
 │   ├── серов.mp4
+│   ├── степанов.mp4
 │   ├── шевченко.mp4
 │   ├── яковлев.mp4
 │   └── другие.mp4
