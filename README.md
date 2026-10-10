@@ -198,6 +198,7 @@ The bot includes celebration videos for specific players:
 - **богомолов/багич** → `celebrations/богомолов.mp4`
 - **валиев** → `celebrations/валиев.mp4`
 - **гришанов/гришан** → `celebrations/гришанов.mp4`
+- **демьянюк** → `celebrations/демьянюк.mp4`
 - **долженков/долж** → `celebrations/долженков.mp4`
 - **жарких/жар** → `celebrations/жарких.mp4`
 - **заночуев** → `celebrations/заночуев.mp4`
@@ -279,6 +280,7 @@ bu-text-translation/
 │   ├── богомолов.mp4
 │   ├── валиев.mp4
 │   ├── гришанов.mp4
+│   ├── демьянюк.mp4
 │   ├── долженков.mp4
 │   ├── жарких.mp4
 │   ├── заночуев.mp4
