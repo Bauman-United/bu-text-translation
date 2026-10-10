@@ -139,6 +139,7 @@ def test_channel_trackers_are_shared_and_resettable():
     ("колач", "celebrations/колочков.mp4"),
     ("Королёв", "celebrations/королев.mp4"),
     ("Король", "celebrations/королев.mp4"),
+    ("Коврегин", "celebrations/коврегин.mp4"),
     ("Курмакаев", "celebrations/курмакаев.mp4"),
     ("Рус", "celebrations/курмакаев.mp4"),
     ("Поляков", "celebrations/поляков.mp4"),
