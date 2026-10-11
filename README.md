@@ -201,6 +201,7 @@ The bot includes celebration videos for specific players:
 - **демьянюк** → `celebrations/демьянюк.mp4`
 - **долженков/долж** → `celebrations/долженков.mp4`
 - **жарких/жар** → `celebrations/жарких.mp4`
+- **зайцев** → `celebrations/зайцев.mp4`
 - **заночуев** → `celebrations/заночуев.mp4`
 - **калиниченко/калина** → `celebrations/калиниченко.mp4`
 - **коврегин** → `celebrations/коврегин.mp4`
@@ -283,6 +284,7 @@ bu-text-translation/
 │   ├── демьянюк.mp4
 │   ├── долженков.mp4
 │   ├── жарких.mp4
+│   ├── зайцев.mp4
 │   ├── заночуев.mp4
 │   ├── калиниченко.mp4
 │   ├── коврегин.mp4
