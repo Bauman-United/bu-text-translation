@@ -215,6 +215,7 @@ The bot includes celebration videos for specific players:
 - **поляшов/поляшёв/поляш** → `celebrations/поляшов.mp4`
 - **серов** → `celebrations/серов.mp4`
 - **степанов/степ** → `celebrations/степанов.mp4`
+- **фролов** → `celebrations/фролов.mp4`
 - **шевченко/шева** → `celebrations/шевченко.mp4`
 - **яковлев/ярик** → `celebrations/яковлев.mp4`
 - **Other players** → `celebrations/другие.mp4`
@@ -298,6 +299,7 @@ bu-text-translation/
 │   ├── поляшов.mp4
 │   ├── серов.mp4
 │   ├── степанов.mp4
+│   ├── фролов.mp4
 │   ├── шевченко.mp4
 │   ├── яковлев.mp4
 │   └── другие.mp4
