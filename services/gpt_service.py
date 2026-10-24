@@ -28,7 +28,7 @@ class GPTCommentaryService:
             raise ValueError("OpenAI API key not configured")
         
         self.client = OpenAI(api_key=self.config.OPENAI_KEY)
-        self.model = "gpt-4"  # Using GPT-4 for better quality
+        self.model = "gpt-4.1"  # gpt-4 was retired by OpenAI (404 model_not_found)
         self.error_notifier = error_notifier
     
     async def generate_commentary(
