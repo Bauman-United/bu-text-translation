@@ -232,17 +232,18 @@ def parse_match_page(html: str) -> MatchParseResult:
 
         goal_team = None
         goal_event_div = None
+        is_own_goal = False
 
-        icon1 = team1_event.find("div", class_="timeline__icon")
-        if icon1 and icon1.get("title") == "Гол":
-            goal_team = 1
-            goal_event_div = team1_event
-
-        if goal_team is None:
-            icon2 = team2_event.find("div", class_="timeline__icon")
-            if icon2 and icon2.get("title") == "Гол":
-                goal_team = 2
-                goal_event_div = team2_event
+        # An own goal is drawn on the side of the team it counts for, but names
+        # the opponent who scored it.
+        for team, event_div in ((1, team1_event), (2, team2_event)):
+            icon = event_div.find("div", class_="timeline__icon")
+            title = icon.get("title") if icon else None
+            if title in ("Гол", "Автогол"):
+                goal_team = team
+                goal_event_div = event_div
+                is_own_goal = title == "Автогол"
+                break
 
         if goal_team is None:
             continue
@@ -258,7 +259,7 @@ def parse_match_page(html: str) -> MatchParseResult:
 
         scorer_name = None
         scorer_surname = None
-        if is_our_goal:
+        if is_our_goal and not is_own_goal:
             name_tag = goal_event_div.find("a", class_="timeline__name")
             if name_tag:
                 scorer_name = name_tag.get_text(strip=True)

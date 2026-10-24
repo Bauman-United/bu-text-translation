@@ -13,6 +13,7 @@ scraping) and optionally a match_url + seen_scores for the site mode.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -80,7 +81,11 @@ def _save_raw(items: List[dict]) -> None:
     path = _get_store_path()
     _ensure_parent_dir(path)
     payload = {"version": 1, "items": items}
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    # Write a sibling file and swap it in: writing in place truncates the
+    # store first, so a failed write (e.g. a full disk) wiped every schedule.
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def _item_to_schedule(it: dict) -> Optional[GameSchedule]:

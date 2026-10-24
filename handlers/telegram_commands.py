@@ -369,8 +369,17 @@ async def _handle_match_url_input(update: Update, context: ContextTypes.DEFAULT_
 
     # Persist the parse mode + URL + already-seen scores
     seen_scores = [g.score for g in goals]
-    update_game_parse_mode(schedule_id, "site", match_url)
-    update_game_seen_scores(schedule_id, seen_scores)
+    try:
+        update_game_parse_mode(schedule_id, "site", match_url)
+        update_game_seen_scores(schedule_id, seen_scores)
+    except Exception as e:
+        logger.error(f"Error saving match URL for schedule {schedule_id}: {e}")
+        await update.message.reply_text(
+            f"❌ Не удалось сохранить ссылку: {e}\n"
+            "Попробуйте отправить её ещё раз."
+        )
+        context.user_data[MATCH_URL_PENDING_KEY] = schedule_id
+        return
 
     # Post existing goals to channel
     if goals:
